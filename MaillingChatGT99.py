@@ -1,4 +1,4 @@
-__version__ = (4, 0, 3) # Эстетичная v4 без комментариев
+__version__ = (4, 0, 3) 
 
 # meta developer: @SenkoGuardianModules / @ilovesenko
 from .. import loader, utils
