@@ -1,4 +1,4 @@
-__version__ = (4, 0, 3) 
+__version__ = (4, 0, 0) 
 
 # meta developer: @SenkoGuardianModules / @ilovesenko
 from .. import loader, utils
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 @loader.tds
 class MaillingChatGT99Mod(loader.Module):
-    """Модуль для массовой рассылки сообщений по чатам v4 (с измененной логикой интервалов и улучшенным safe_mode)."""
+    """Модуль для массовой рассылки сообщений по чатам v4 (Подерживает все виды сообщений)."""
     strings = {
         "name": "MaillingChatGT99",
         "add_chat": "➕ Добавить текущий чат",
