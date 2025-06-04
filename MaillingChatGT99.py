@@ -1,4 +1,4 @@
-__version__ = (5, 6, 0) #еее фикс подоспел, заодно улучшения
+__version__ = (5, 8, 0) #Новые улучшения!
 
 # meta developer: @SenkoGuardianModules
 
@@ -28,12 +28,20 @@ from .. import loader, utils
 
 logger = logging.getLogger(__name__)
 
+class SpecificWarningFilter(logging.Filter):
+    def filter(self, record):
+        if record.name == 'hikkatl.hikkatl.client.users' and \
+           'PersistentTimestampOutdatedError' in record.getMessage() and \
+           'GetChannelDifferenceRequest' in record.getMessage():
+            return False
+        return True
+
 @loader.tds
 class MaillingChatGT99(loader.Module):
     """Модуль для массовой рассылки сообщений по чатам v5.6.0 (Поддерживает все типы сообщений (кроме цитат))"""
     strings = {
         "name": "MaillingChatGT99",
-        "add_chat": "➕ Добавить текущий чат/тему. Используйте .add_chat или .add_chat <ID/Username/Ссылка>.",
+        "add_chat": "➕ Добавить текущий чат/тему. Используйте .add_chat или .add_chat <ID/Username/Ссылка> (Можно сразу несколько ссылкок в 1 комманду).",
         "remove_chat": "🗑️ Удалить чат/тему по номеру из списка. Используйте .remove_chat <номер>.",
         "list_chats": "📜 Показать список чатов/тем для рассылки.",
         "add_msg": "➕ Добавить сообщение (ответом).",
@@ -86,6 +94,12 @@ class MaillingChatGT99(loader.Module):
         "cfg_safe_message_interval": "Интервал между сообщениями в 1 чат в БЕЗОПАСНОМ режиме (сек, от-до). Пример: 5,10",
         "cfg_message_interval": "Интервал между сообщениями в 1 чат (сек, от-до). Пример: 1,3",
         "cfg_delete_replies_delay": "⏱️ Задержка автоудаления для ответов команд (сек, 0 - не удалять)",
+        "cfg_randomize_messages": "Рандомизировать сообщения (1 случайное сообщение на чат за цикл)",
+        "add_chat_summary_title": "<b>Результаты добавления чатов:</b>\n\n",
+        "add_chat_success_header": "<b>Добавлено:</b>\n",
+        "add_chat_already_exists_header": "<b>Уже существуют:</b>\n",
+        "add_chat_errors_header": "<b>Ошибки:</b>\n",
+        "no_valid_chats_provided": "⚠️ Не предоставлено валидных идентификаторов чатов или произошли ошибки при их обработке.",
     }
     PERMISSION_ERRORS = {
         "ChatForbiddenError", "UserBannedInChannelError", "ChatWriteForbiddenError",
@@ -103,6 +117,7 @@ class MaillingChatGT99(loader.Module):
             loader.ConfigValue("safe_message_interval", "5,10", lambda: self.strings("cfg_safe_message_interval"), validator=loader.validators.String()),
             loader.ConfigValue("message_interval", "1,3", lambda: self.strings("cfg_message_interval"), validator=loader.validators.String()),
             loader.ConfigValue("delete_replies_delay", 5, lambda: self.strings("cfg_delete_replies_delay"), validator=loader.validators.Integer(minimum=0)),
+            loader.ConfigValue("randomize_messages", False, lambda: self.strings("cfg_randomize_messages"), validator=loader.validators.Boolean()),
         )
         self.chats = {}
         self.messages = []
@@ -115,6 +130,14 @@ class MaillingChatGT99(loader.Module):
         self.lock = asyncio.Lock()
         self._current_cycle_start_time: Optional[datetime] = None
         self._processed_chats_in_cycle = 0
+        
+        try:
+            h_logger = logging.getLogger('hikkatl.hikkatl.client.users')
+            if not any(isinstance(f, SpecificWarningFilter) for f in h_logger.filters):
+                h_logger.addFilter(SpecificWarningFilter())
+        except Exception as e:
+            logger.error(f"Failed to apply SpecificWarningFilter: {e}")
+
 
     def _validate_interval_tuple(self, value, default_tuple: Tuple[float, float]) -> Tuple[float, float]:
         parsed_value = None
@@ -251,74 +274,148 @@ class MaillingChatGT99(loader.Module):
         try:
             resolved_identifier = identifier
             if isinstance(identifier, str):
-                try: resolved_identifier = int(identifier)
-                except ValueError: pass
+                if identifier.startswith('c/'):
+                    resolved_identifier = int(identifier.split('/')[1])
+                    if resolved_identifier > 0:
+                         resolved_identifier = int(f"-100{resolved_identifier}") 
+                else:
+                    try: resolved_identifier = int(identifier)
+                    except ValueError: pass
             elif isinstance(identifier, (int, float)):
                 resolved_identifier = int(identifier)
+            
             entity = await self.client.get_entity(resolved_identifier)
             return telethon_utils.get_peer_id(entity), entity
         except Exception as e:
             logger.error(f"Ошибка получения сущности для '{identifier}': {e}")
             return None, None
 
-    @loader.command(ru_doc="➕ Добавить текущий чат/тему. Используйте .add_chat или .add_chat <ID/Username/Ссылка>.")
+    @loader.command(ru_doc="➕ Добавить текущий чат/тему. Используйте .add_chat или .add_chat <ID/Username/Ссылка> (Можно сразу несколько ссылкок в 1 комманду).")
     async def add_chat(self, message):
-        args = utils.get_args_raw(message).strip()
-        identifier_to_resolve = None
-        target_topic_id = None
+        args_raw = utils.get_args_raw(message).strip()
         reply = await message.get_reply_message()
         source_context = reply or message
 
-        if args:
-            identifier_to_resolve = args
+        identifiers_to_process_spec = []
+
+        if args_raw:
+            for ident_str in args_raw.split():
+                identifiers_to_process_spec.append({"input_identifier": ident_str, "is_context_based": False})
         elif source_context and source_context.chat_id:
-            identifier_to_resolve = source_context.chat_id
-            if hasattr(source_context, 'is_topic_message') and source_context.is_topic_message:
-                if source_context.reply_to and hasattr(source_context.reply_to, 'reply_to_top_id') and source_context.reply_to.reply_to_top_id is not None:
-                    target_topic_id = source_context.reply_to.reply_to_top_id
-                elif isinstance(source_context, tl_types.MessageService) and isinstance(source_context.action, tl_types.MessageActionTopicCreate):
-                    target_topic_id = source_context.id
-                elif source_context.reply_to and hasattr(source_context.reply_to, 'reply_to_msg_id') and source_context.reply_to.reply_to_msg_id is not None:
-                     target_topic_id = source_context.reply_to.reply_to_msg_id
-        
-        if not identifier_to_resolve:
-            await self._edit_or_reply_and_handle_deletion(message, self.strings["invalid_arguments"] + " Укажите ID/username или ответьте на сообщение.", 5)
+            identifiers_to_process_spec.append({"input_identifier": str(source_context.chat_id), "is_context_based": True})
+        else:
+            await self._edit_or_reply_and_handle_deletion(message, self.strings["invalid_arguments"] + " Укажите ID/username/ссылку или ответьте на сообщение.", 5)
             return
 
-        await self._edit_or_reply_and_handle_deletion(message, self.strings["processing_entity"], delay=0) 
+        await self._edit_or_reply_and_handle_deletion(message, self.strings["processing_entity"], delay=0)
 
-        chat_id_resolved, entity = await self._resolve_entity_and_get_id(identifier_to_resolve)
+        added_chats_msgs = []
+        already_added_msgs = []
+        error_msgs = []
 
-        if not entity or not chat_id_resolved:
-            error_msg = self.strings["error_getting_entity"].format(f"'{identifier_to_resolve}'")
-            await self._edit_or_reply_and_handle_deletion(message, error_msg, 5)
-            return
-
-        target_chat_id = chat_id_resolved
-        is_forum = isinstance(entity, tl_types.Channel) and getattr(entity, 'forum', False)
-        if target_topic_id and not is_forum: target_topic_id = None
-        
-        chat_key = (target_chat_id, target_topic_id)
         async with self.lock:
-            if chat_key in self.chats:
-                await self._edit_or_reply_and_handle_deletion(message, self.strings["chat_already_added"].format(self.chats[chat_key]))
-                return
+            for item_spec in identifiers_to_process_spec:
+                identifier_input_str = item_spec["input_identifier"]
+                is_context_based_lookup = item_spec["is_context_based"]
+                
+                chat_identifier_for_resolution = identifier_input_str
+                current_target_topic_id = None
+
+                if not is_context_based_lookup:
+                    link_pattern = re.compile(r"https://t\.me/(?:c/)?([\w\d_.-]+)/(\d+)")
+                    match = link_pattern.match(identifier_input_str)
+                    if match:
+                        parsed_chat_part = match.group(1)
+                        try:
+                            parsed_message_id = int(match.group(2))
+                            chat_identifier_for_resolution = parsed_chat_part
+                            current_target_topic_id = parsed_message_id
+                            logger.debug(f"Parsed link: chat_identifier='{chat_identifier_for_resolution}', potential_topic_id='{current_target_topic_id}'")
+                        except ValueError:
+                            logger.warning(f"Could not parse message ID from link segment: {match.group(2)} in {identifier_input_str}")
+                            chat_identifier_for_resolution = identifier_input_str 
+                            current_target_topic_id = None
+                elif is_context_based_lookup:
+                    chat_identifier_for_resolution = str(source_context.chat_id) 
+                    if hasattr(source_context, 'is_topic_message') and source_context.is_topic_message:
+                        if source_context.reply_to and \
+                           getattr(source_context.reply_to, 'forum_topic', False) and \
+                           getattr(source_context.reply_to, 'reply_to_top_id', None) is not None:
+                            current_target_topic_id = source_context.reply_to.reply_to_top_id
+                        elif getattr(source_context, 'reply_to_top_id', None) is not None:
+                            current_target_topic_id = source_context.reply_to_top_id
+                        elif isinstance(source_context, tl_types.MessageService) and \
+                             isinstance(source_context.action, tl_types.MessageActionTopicCreate):
+                            current_target_topic_id = source_context.id
+                        elif source_context.id:
+                             current_target_topic_id = source_context.id
+                    logger.debug(f"Context-based lookup: chat_identifier='{chat_identifier_for_resolution}', potential_topic_id='{current_target_topic_id}'")
+
+
+                chat_id_resolved, entity = await self._resolve_entity_and_get_id(chat_identifier_for_resolution)
+
+                if not entity or not chat_id_resolved:
+                    error_msgs.append(f"• {self.strings['error_getting_entity'].format(utils.escape_html(str(identifier_input_str)))}")
+                    continue
+
+                target_chat_id = chat_id_resolved
+                is_forum = isinstance(entity, tl_types.Channel) and getattr(entity, 'forum', False)
+                
+                if current_target_topic_id and not is_forum:
+                    logger.info(f"A topic ID ({current_target_topic_id}) was determined for chat '{utils.escape_html(get_display_name(entity))}', but it's not a forum. Topic ID will be ignored.")
+                    current_target_topic_id = None 
+
+                chat_key = (target_chat_id, current_target_topic_id)
+
+                if chat_key in self.chats:
+                    already_added_msgs.append(f"• {self.strings['chat_already_added'].format(utils.escape_html(self.chats[chat_key]))}")
+                    continue
+                
+                chat_name_display = utils.escape_html(get_display_name(entity))
+                if current_target_topic_id and is_forum:
+                    try:
+                        topic_info_msg_obj = None
+                        _topic_messages = await self.client.get_messages(entity, ids=current_target_topic_id)
+                        if _topic_messages: topic_info_msg_obj = _topic_messages[0]
+
+                        if topic_info_msg_obj and isinstance(topic_info_msg_obj, tl_types.MessageService) and isinstance(topic_info_msg_obj.action, tl_types.MessageActionTopicCreate):
+                            chat_name_display += f" | Topic: '{utils.escape_html(topic_info_msg_obj.action.title)}'"
+                        elif topic_info_msg_obj and topic_info_msg_obj.is_topic_message and getattr(topic_info_msg_obj,'action', None) is None:
+                            actual_topic_creation_msg_id = getattr(topic_info_msg_obj, 'reply_to_top_id', None)
+                            if actual_topic_creation_msg_id:
+                                _creation_msgs = await self.client.get_messages(entity, ids=actual_topic_creation_msg_id)
+                                if _creation_msgs and isinstance(_creation_msgs[0], tl_types.MessageService) and isinstance(_creation_msgs[0].action, tl_types.MessageActionTopicCreate):
+                                    chat_name_display += f" | Topic: '{utils.escape_html(_creation_msgs[0].action.title)}'"
+                                else:
+                                    chat_name_display += f" | Topic (msg {current_target_topic_id}): '{utils.escape_html(topic_info_msg_obj.text[:30])}{'...' if topic_info_msg_obj.text and len(topic_info_msg_obj.text) > 30 else ''}'"
+                            else:
+                                chat_name_display += f" | Topic (msg {current_target_topic_id}): '{utils.escape_html(topic_info_msg_obj.text[:30])}{'...' if topic_info_msg_obj.text and len(topic_info_msg_obj.text) > 30 else ''}'"
+                        else:
+                             chat_name_display += f" | Topic ID: {current_target_topic_id}"
+                    except Exception as e_topic:
+                        logger.warning(f"Ошибка получения инфо о теме {current_target_topic_id} в чате {target_chat_id} ({utils.escape_html(get_display_name(entity))}): {e_topic}")
+                        chat_name_display += f" | Topic ID: {current_target_topic_id} (ошибка инфо)"
+                
+                self.chats[chat_key] = chat_name_display
+                added_chats_msgs.append(f"• {self.strings['chat_added'].format(utils.escape_html(chat_name_display))}")
+
+            if added_chats_msgs or already_added_msgs or error_msgs:
+                self._db.set(self.strings["name"], "chats", {str(k): v for k, v in self.chats.items()})
+
+        response_text = ""
+        if added_chats_msgs or already_added_msgs or error_msgs:
+            response_text = self.strings["add_chat_summary_title"]
+            if added_chats_msgs:
+                response_text += self.strings["add_chat_success_header"] + "\n".join(added_chats_msgs) + "\n\n"
+            if already_added_msgs:
+                response_text += self.strings["add_chat_already_exists_header"] + "\n".join(already_added_msgs) + "\n\n"
+            if error_msgs:
+                response_text += self.strings["add_chat_errors_header"] + "\n".join(error_msgs) + "\n"
+        else:
+            response_text = self.strings["no_valid_chats_provided"]
             
-            chat_name_display = utils.escape_html(get_display_name(entity))
-            if target_topic_id and is_forum:
-                try:
-                    topic_info_msgs = await self.client.get_messages(entity, ids=target_topic_id) 
-                    topic_info = topic_info_msgs[0] if topic_info_msgs else None
-                    if topic_info and isinstance(topic_info, tl_types.MessageService) and isinstance(topic_info.action, tl_types.MessageActionTopicCreate):
-                         chat_name_display += f" | Topic: '{utils.escape_html(topic_info.action.title)}'"
-                    elif topic_info and topic_info.text: 
-                         chat_name_display += f" | Topic: '{utils.escape_html(topic_info.text[:30])}{'...' if len(topic_info.text) > 30 else ''}'"
-                    else: chat_name_display += f" | Topic ID: {target_topic_id}"
-                except Exception as e_topic: logger.warning(f"Ошибка получения инфо о теме {target_topic_id}: {e_topic}"); chat_name_display += f" | Topic ID: {target_topic_id} (info error)"
-            
-            self.chats[chat_key] = chat_name_display
-            self._db.set(self.strings["name"], "chats", {str(k):v for k,v in self.chats.items()})
-            await self._edit_or_reply_and_handle_deletion(message, self.strings["chat_added"].format(chat_name_display))
+        await self._edit_or_reply_and_handle_deletion(message, response_text.strip())
+
 
     @loader.command(ru_doc="🗑️ Удалить чат/тему по номеру из списка. Используйте .remove_chat <номер>.")
     async def remove_chat(self, message):
@@ -439,6 +536,7 @@ class MaillingChatGT99(loader.Module):
             is_running = self.is_running; s_time = self.start_time; e_time = self.end_time
             sent_count = self.total_messages_sent; chats_len = len(self.chats)
             safe_mode_cfg = self.config["safe_mode"]
+            randomize_messages_cfg = self.config["randomize_messages"]
             task_active = (self.mail_task and not self.mail_task.done() and not self.mail_task.cancelled())
             cycle_s_time = self._current_cycle_start_time; processed_cycle = self._processed_chats_in_cycle
         
@@ -459,6 +557,7 @@ class MaillingChatGT99(loader.Module):
         
         status_text += (f"✉️ <b>Отправлено сообщений (запуск):</b> {sent_count}\n"
                         f"🎯 <b>Всего чатов в списке:</b> {chats_len}\n"
+                        f"🎲 <b>Рандом сообщений:</b> {'ВКЛ' if randomize_messages_cfg else 'ВЫКЛ'}\n"
                         f"💾 <b>Режим безопасности:</b> {'ВКЛ' if safe_mode_cfg else 'ВЫКЛ'}")
         
         delay_for_status = self.config["delete_replies_delay"]
@@ -494,21 +593,42 @@ class MaillingChatGT99(loader.Module):
             self._current_cycle_start_time = None; self._processed_chats_in_cycle = 0
 
             is_safe_cfg = self.config["safe_mode"]
+            randomize_msg_cfg = self.config["randomize_messages"]
+            
             short_int_disp = self._validate_interval_tuple(self.config["safe_chats_interval"] if is_safe_cfg else self.config["chats_interval"], (10,20) if is_safe_cfg else (2,5))
-            msg_int_disp = self._validate_interval_tuple(self.config["safe_message_interval"] if is_safe_cfg else self.config["message_interval"], (5,10) if is_safe_cfg else (1,3))
+            msg_int_disp_val = (0,0) 
+            if not randomize_msg_cfg: 
+                msg_int_disp_val = self._validate_interval_tuple(self.config["safe_message_interval"] if is_safe_cfg else self.config["message_interval"], (5,10) if is_safe_cfg else (1,3))
+
             cycle_int_disp = self._validate_interval_tuple(self.config["safe_cycle_interval"],(180,300)) if is_safe_cfg else cycle_interval_input
             
-            start_message_text = self.strings["started_mailing"].format(duration, f"{cycle_int_disp[0]:.1f}", f"{cycle_int_disp[1]:.1f}",f"{short_int_disp[0]:.1f}", f"{short_int_disp[1]:.1f}",f"{msg_int_disp[0]:.1f}", f"{msg_int_disp[1]:.1f}")
+            start_message_text_base = self.strings["started_mailing"].format(
+                duration, 
+                f"{cycle_int_disp[0]:.1f}", f"{cycle_int_disp[1]:.1f}",
+                f"{short_int_disp[0]:.1f}", f"{short_int_disp[1]:.1f}",
+                f"{msg_int_disp_val[0]:.1f}", f"{msg_int_disp_val[1]:.1f}"
+            )
+            if randomize_msg_cfg:
+                 start_message_text_base = self.strings["started_mailing"].format(
+                    duration, 
+                    f"{cycle_int_disp[0]:.1f}", f"{cycle_int_disp[1]:.1f}",
+                    f"{short_int_disp[0]:.1f}", f"{short_int_disp[1]:.1f}",
+                    "N/A", "N/A" 
+                )
+                 start_message_text_base += f"\n🎲 <b>Рандомизация сообщений: ВКЛ</b> (1 сообщ./чат)"
+
+
             if is_safe_cfg:
-                 start_message_text += "\n" + self.strings["safe_mode_enabled"].format(
+                 start_message_text_base += "\n" + self.strings["safe_mode_enabled"].format(
                     self.config["max_chats_safe"],
                     f"{short_int_disp[0]:.1f}", f"{short_int_disp[1]:.1f}",
                     f"{cycle_int_disp[0]:.1f}", f"{cycle_int_disp[1]:.1f}",
-                    f"{msg_int_disp[0]:.1f}", f"{msg_int_disp[1]:.1f}"
-                ).split("\n")[0]
+                    f"{msg_int_disp_val[0]:.1f}" if not randomize_msg_cfg else "N/A", 
+                    f"{msg_int_disp_val[1]:.1f}" if not randomize_msg_cfg else "N/A"
+                ).split("\n")[0] 
             
             delay_for_start_msg = self.config["delete_replies_delay"]
-            await self._edit_or_reply_and_handle_deletion(current_message_for_status, start_message_text, delay= delay_for_start_msg if delay_for_start_msg > 0 else 20)
+            await self._edit_or_reply_and_handle_deletion(current_message_for_status, start_message_text_base, delay= delay_for_start_msg if delay_for_start_msg > 0 else 20)
 
             self.mail_task = asyncio.create_task(
                 self._mail_loop(duration, cycle_int_disp, message), 
@@ -545,7 +665,7 @@ class MaillingChatGT99(loader.Module):
 
     async def _is_safe_chat(self, entity: tl_types.TypePeer) -> bool:
         if isinstance(entity, (tl_types.Chat, tl_types.Channel)):
-             return telethon_utils.get_peer_id(entity) < -100
+             return telethon_utils.get_peer_id(entity) < -1000000000 
         return False
 
     async def _send_to_chat(self, target_chat_id: int, msg_info: dict, target_topic_id: Optional[int] = None) -> Tuple[bool, str]:
@@ -557,20 +677,31 @@ class MaillingChatGT99(loader.Module):
             if not original_msg: return (False, f"Оригинальное сообщение {original_msg_id} в {original_chat_id} не найдено.")
         except Exception as e: return (False, f"Ошибка получения {original_msg_id} из {original_chat_id}: {type(e).__name__}")
 
-        for attempt in range(5):
+        for attempt in range(5): 
             try:
                 await self.client.send_message(entity=target_chat_id, message=original_msg, reply_to=target_topic_id)
-                self.total_messages_sent += 1
+                async with self.lock: self.total_messages_sent += 1 
                 return (True, "OK")
             except errors.FloodWaitError as e_flood:
-                if attempt < 4: await asyncio.sleep(e_flood.seconds + random.uniform(1,2)); continue
+                if attempt < 4: 
+                    logger.warning(f"FloodWait for {e_flood.seconds}s when sending to {target_chat_id}. Attempt {attempt+1}/5. Sleeping...")
+                    await asyncio.sleep(e_flood.seconds + random.uniform(1,3)) 
+                    continue
                 return (False, f"FloodWait ({e_flood.seconds}s)")
-            except errors.SlowModeWaitError as e_slow: await asyncio.sleep(e_slow.seconds + random.uniform(0.2,0.5)); return(False, "SlowMode")
+            except errors.SlowModeWaitError as e_slow:
+                logger.warning(f"SlowModeWait for {e_slow.seconds}s in {target_chat_id}. Sleeping...")
+                await asyncio.sleep(e_slow.seconds + random.uniform(0.2,0.5))
+                return(False, "SlowMode") 
             except errors.RPCError as e_rpc:
                  if type(e_rpc).__name__ in self.PERMISSION_ERRORS: return (False, type(e_rpc).__name__)
+                 logger.warning(f"RPCError sending to {target_chat_id}: {type(e_rpc).__name__} - {e_rpc}. Attempt {attempt+1}/5.")
+                 if attempt < 4: await asyncio.sleep(random.uniform(2,5)); continue 
                  return (False, f"RPCError: {type(e_rpc).__name__}")
-            except Exception as e_unexp: return (False, f"Unexpected: {type(e_unexp).__name__}")
-        return (False, "Max retries reached")
+            except Exception as e_unexp:
+                 logger.error(f"Unexpected error sending to {target_chat_id}: {type(e_unexp).__name__} - {e_unexp}")
+                 return (False, f"Unexpected: {type(e_unexp).__name__}")
+        return (False, "Max retries reached") 
+
 
     async def _mail_loop(self, duration_seconds: int, cycle_interval_seconds_range: Tuple[float, float], initial_command_message_event):
         start_time_loop = datetime.now()
@@ -586,14 +717,17 @@ class MaillingChatGT99(loader.Module):
                 
                 async with self.lock: 
                     current_chats = list(self.chats.keys())
-                    current_messages_list = list(self.messages)
+                    current_messages_list = list(self.messages) 
                     is_safe_mode = self.config["safe_mode"]
+                    randomize_messages_cfg = self.config["randomize_messages"]
                     max_c_per_cycle = self.config["max_chats_safe"] 
                     short_interval = self._validate_interval_tuple(self.config["safe_chats_interval"] if is_safe_mode else self.config["chats_interval"], (10,20) if is_safe_mode else (2,5))
-                    message_interval = self._validate_interval_tuple(self.config["safe_message_interval"] if is_safe_mode else self.config["message_interval"], (5,10) if is_safe_mode else (1,3))
+                    message_interval_val = (0,0) 
+                    if not randomize_messages_cfg:
+                        message_interval_val = self._validate_interval_tuple(self.config["safe_message_interval"] if is_safe_mode else self.config["message_interval"], (5,10) if is_safe_mode else (1,3))
                 
                 if not current_chats or not current_messages_list:
-                    self.is_running = False
+                    async with self.lock: self.is_running = False 
                     reason_empty = "чатов" if not current_chats else "сообщений"
                     final_status_for_user = f"⚠️ Рассылка остановлена: список {reason_empty} пуст."
                     final_status_for_seller += f" (остановлено: список {reason_empty} пуст)"
@@ -601,56 +735,92 @@ class MaillingChatGT99(loader.Module):
                 
                 random.shuffle(current_chats)
                 chats_for_this_cycle = current_chats[:min(max_c_per_cycle if is_safe_mode else len(current_chats), len(current_chats))]
-                logger.info(f"Новый цикл ({datetime.now():%H:%M:%S}). Чатов к обработке: {len(chats_for_this_cycle)} (Safe: {is_safe_mode}, Max: {max_c_per_cycle if is_safe_mode else 'All'}).")
+                logger.info(f"Новый цикл ({datetime.now():%H:%M:%S}). Чатов к обработке: {len(chats_for_this_cycle)} (Safe: {is_safe_mode}, Max: {max_c_per_cycle if is_safe_mode else 'All'}, RandomMsg: {randomize_messages_cfg}).")
 
                 for i, (chat_id_target, topic_id_target) in enumerate(chats_for_this_cycle):
                     if not self.is_running or datetime.now() >= end_time_loop: break
                     
-                    chat_display_name = self.chats.get((chat_id_target, topic_id_target), f"ID:{chat_id_target}")
+                    async with self.lock: chat_display_name = self.chats.get((chat_id_target, topic_id_target), f"ID:{chat_id_target}")
                     try:
                         entity_obj = await self.client.get_entity(chat_id_target)
                         if is_safe_mode and not await self._is_safe_chat(entity_obj):
                             logger.info(f"[Safe Mode] Пропуск не-группы/канала: {chat_display_name}")
-                            self._processed_chats_in_cycle += 1; continue
+                            async with self.lock: self._processed_chats_in_cycle += 1
+                            continue
                     except Exception as e_ent_loop:
                         logger.warning(f"Не удалось получить сущность для {chat_display_name}: {e_ent_loop}. Пропуск."); 
-                        self._processed_chats_in_cycle += 1; continue
+                        async with self.lock: self._processed_chats_in_cycle += 1
+                        continue
                     
                     sent_count_this_chat = 0; permission_issue = False
-                    shuffled_messages_for_chat = random.sample(current_messages_list, len(current_messages_list))
 
-                    for message_detail in shuffled_messages_for_chat:
-                        if not self.is_running or datetime.now() >= end_time_loop: break
+                    if randomize_messages_cfg:
+                        if not current_messages_list: 
+                            logger.warning(f"Список сообщений пуст, хотя проверка пройдена. Пропуск чата {chat_display_name}.")
+                            async with self.lock: self._processed_chats_in_cycle += 1
+                            continue
                         
-                        success_send, reason_send = await self._send_to_chat(chat_id_target, message_detail, topic_id_target)
-                        if success_send: sent_count_this_chat += 1
+                        message_to_send = random.choice(current_messages_list)
+                        success_send, reason_send = await self._send_to_chat(chat_id_target, message_to_send, topic_id_target)
+                        if success_send: 
+                            sent_count_this_chat += 1
                         else:
-                            if reason_send in self.PERMISSION_ERRORS: permission_issue = True; break
-                            logger.warning(f"Ошибка отправки в {chat_display_name} (сообщ.ID {message_detail['id']}): {reason_send}. Прерываю для чата.")
-                            break 
-                        
-                        if self.is_running and datetime.now() < end_time_loop and sent_count_this_chat < len(shuffled_messages_for_chat):
-                            await asyncio.sleep(random.uniform(message_interval[0], message_interval[1]))
+                            if reason_send in self.PERMISSION_ERRORS: 
+                                permission_issue = True
+                                logger.warning(f"Проблема с правами ({reason_send}) при отправке в {chat_display_name}. Пропуск чата.")
+                            else: 
+                                logger.warning(f"Ошибка отправки случайного сообщения в {chat_display_name} (ID {message_to_send['id']}): {reason_send}. Прерываю для этого чата.")
+                    else: 
+                        shuffled_messages_for_chat = random.sample(current_messages_list, len(current_messages_list))
+                        for message_detail in shuffled_messages_for_chat:
+                            if not self.is_running or datetime.now() >= end_time_loop: break
+                            
+                            success_send, reason_send = await self._send_to_chat(chat_id_target, message_detail, topic_id_target)
+                            if success_send: sent_count_this_chat += 1
+                            else:
+                                if reason_send in self.PERMISSION_ERRORS: 
+                                    permission_issue = True
+                                    logger.warning(f"Проблема с правами ({reason_send}) при отправке в {chat_display_name}. Прерываю для чата.")
+                                else:
+                                    logger.warning(f"Ошибка отправки в {chat_display_name} (сообщ.ID {message_detail['id']}): {reason_send}. Прерываю для чата.")
+                                break 
+                            
+                            if self.is_running and datetime.now() < end_time_loop and sent_count_this_chat < len(shuffled_messages_for_chat): 
+                                await asyncio.sleep(random.uniform(message_interval_val[0], message_interval_val[1]))
+                        if not self.is_running or datetime.now() >= end_time_loop: break 
                     
-                    if sent_count_this_chat > 0 or permission_issue: self._processed_chats_in_cycle += 1
-                    if not self.is_running or datetime.now() >= end_time_loop: break
+                    async with self.lock: 
+                        if sent_count_this_chat > 0 or permission_issue: 
+                            self._processed_chats_in_cycle += 1
+                    
+                    if permission_issue: 
+                        logger.info(f"Проблема с правами для чата {chat_display_name}, возможно, переход к следующему циклу или длительная пауза.")
+
+                    if not self.is_running or datetime.now() >= end_time_loop: break 
+                    
                     if i < len(chats_for_this_cycle) - 1 and not permission_issue:
                          await asyncio.sleep(random.uniform(short_interval[0], short_interval[1]))
                 
-                if not self.is_running or datetime.now() >= end_time_loop: break
-                if len(chats_for_this_cycle) > 0 :
+                if not self.is_running or datetime.now() >= end_time_loop: break 
+                
+                if len(chats_for_this_cycle) > 0 : 
                     time_for_cycle_wait = random.uniform(cycle_interval_seconds_range[0], cycle_interval_seconds_range[1])
-                    remaining_total_time = (end_time_loop - datetime.now()).total_seconds()
-                    actual_cycle_wait = max(0.0, min(time_for_cycle_wait, remaining_total_time))
+                    remaining_total_time_s = (end_time_loop - datetime.now()).total_seconds()
+                    
+                    actual_cycle_wait = max(0.0, min(time_for_cycle_wait, remaining_total_time_s if remaining_total_time_s > 0 else 0))
+                    
                     if actual_cycle_wait > 0: 
                         logger.info(f"Пауза между циклами: {actual_cycle_wait:.1f} сек.")
                         await asyncio.sleep(actual_cycle_wait)
-                    else: break 
+                    elif remaining_total_time_s <=0 : 
+                        logger.info("Время рассылки истекло во время расчета паузы между циклами.")
+                        break 
 
-            if datetime.now() >= end_time_loop and (self.is_running or self.total_messages_sent > 0):
+            current_time = datetime.now()
+            if current_time >= end_time_loop and (self.is_running or (await self.get_total_messages_sent_atomic()) > 0): 
                  final_status_for_user += " (по времени)"
                  final_status_for_seller += " (завершено по времени)"
-            elif not self.is_running and "пуст" not in final_status_for_user:
+            elif not self.is_running and "пуст" not in final_status_for_user and "отменено" not in final_status_for_user : 
                  final_status_for_user = self.strings["stopped_mailing"] + " (по команде)"
                  final_status_for_seller += " (остановлено по команде)"
         
@@ -664,11 +834,16 @@ class MaillingChatGT99(loader.Module):
             final_status_for_seller = f"Уведомление: ❌ Критическая ошибка в рассылке: {type(e_loop).__name__} - {e_loop}"
         finally:
             logger.info("Завершение задачи рассылки...")
-            total_messages_sent_this_run = self.total_messages_sent
-            async with self.lock:
-                self.is_running = False; self.mail_task = None
-                self._current_cycle_start_time = None; self._processed_chats_in_cycle = 0
+            total_messages_sent_this_run = await self.get_total_messages_sent_atomic()
+
+            async with self.lock: 
+                self.is_running = False
+                self.mail_task = None
+                self._current_cycle_start_time = None
+                self._processed_chats_in_cycle = 0
                 self.total_messages_sent = 0 
+                self.start_time = None 
+                self.end_time = None
 
             final_status_for_user_with_count = f"{final_status_for_user} (Всего отправлено: {total_messages_sent_this_run})"
             final_status_for_seller_with_count = f"{final_status_for_seller} (Всего отправлено: {total_messages_sent_this_run})"
@@ -676,18 +851,27 @@ class MaillingChatGT99(loader.Module):
             try:
                 target_chat_for_final_status = self.client.tg_id 
                 if initial_command_message_event and hasattr(initial_command_message_event, "chat_id"):
-                    target_chat_for_final_status = initial_command_message_event.chat_id
+                    try:
+                        await self.client.get_input_entity(initial_command_message_event.chat_id)
+                        target_chat_for_final_status = initial_command_message_event.chat_id
+                    except Exception: 
+                        logger.warning(f"Не удалось использовать чат команды {initial_command_message_event.chat_id} для финального статуса, использую Saved Messages.")
+                        target_chat_for_final_status = self.client.tg_id
                 
                 await self.client.send_message(target_chat_for_final_status, final_status_for_user_with_count, parse_mode='html')
                 logger.info(f"Финальное сообщение пользователю отправлено в чат {target_chat_for_final_status}.")
             except Exception as e_final_user:
                 logger.error(f"Не удалось отправить финальное сообщение пользователю: {e_final_user}")
 
-            if current_seller_id:
+            if current_seller_id: 
                 try:
                     await self.client.send_message(current_seller_id, final_status_for_seller_with_count, parse_mode='html')
                     logger.info(f"Уведомление о завершении отправлено продавцу {current_seller_id}.")
                 except Exception as e_final_seller:
                     logger.error(f"Не удалось отправить уведомление продавцу {current_seller_id}: {e_final_seller}")
             
-            logger.info(self.strings["mailing_complete"].replace("✅","") + " (финализация).")
+            logger.info(self.strings["mailing_complete"].replace("✅","").strip() + " (финализация).")
+            
+    async def get_total_messages_sent_atomic(self) -> int:
+        async with self.lock:
+            return self.total_messages_sent
