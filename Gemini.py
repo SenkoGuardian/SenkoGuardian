@@ -4,7 +4,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (4, 1, 0)
+__version__ = (4, 1, 1)
 
 #meta developer: @SenkoGuardianModules
 
@@ -188,25 +188,46 @@ class Gemini(loader.Module):
             user_id = getattr(user_parts[0].message, "from_id", None)
             message_id = getattr(user_parts[0].message, "id", None)
         user_text = " ".join([p.text for p in user_parts if hasattr(p, 'text') and p.text]) or "[Пользователь отправил медиа]"
-        history.append({
-            "role": "user",
-            "type": "text",
-            "content": user_text,
-            "date": now,
-            "user_id": user_id,
-            "message_id": message_id
-        })
-        history.append({
-            "role": "model",
-            "type": "text",
-            "content": model_response,
-            "date": now
-        })
+        if regeneration:
+            # --- Изменено: заменяем последний ответ модели ---
+            # Найти последний элемент с role == "model"
+            for i in range(len(history) - 1, -1, -1):
+                if history[i].get("role") == "model":
+                    history[i] = {
+                        "role": "model",
+                        "type": "text",
+                        "content": model_response,
+                        "date": now
+                    }
+                    break
+            else:
+                # Если не найдено, fallback: добавить как обычно
+                history.append({
+                    "role": "model",
+                    "type": "text",
+                    "content": model_response,
+                    "date": now
+                })
+        else:
+            history.append({
+                "role": "user",
+                "type": "text",
+                "content": user_text,
+                "date": now,
+                "user_id": user_id,
+                "message_id": message_id
+            })
+            history.append({
+                "role": "model",
+                "type": "text",
+                "content": model_response,
+                "date": now
+            })
         max_len = self.config["max_history_length"]
         if max_len > 0 and len(history) > max_len * 2:
             history = history[-(max_len * 2):]
         self.conversations[str(chat_id)] = history
-        asyncio.create_task(self._save_history())  # <-- исправлено
+        asyncio.create_task(self._save_history())
 
     # === Конец памяти ===
 
@@ -379,6 +400,10 @@ class Gemini(loader.Module):
         except Exception as e:
             logger.warning(f"Ошибка удаления сообщения: {e}")
 
+    async def _clear_callback(self, call: InlineCall, chat_id: int):
+        self._clear_history(chat_id)
+        await call.edit(self.strings["memory_cleared_cb"], reply_markup=None)
+
     @loader.command()
     async def g(self, message: Message):
         """[текст или reply] — спросить у Gemini"""
@@ -416,7 +441,8 @@ class Gemini(loader.Module):
                 safety_settings=self.safety_settings,
                 system_instruction=self.config["system_instruction"].strip() or None
             )
-            self.last_requests[chat_id] = parts
+            if not regeneration:
+                self.last_requests[chat_id] = parts
             history = self._deserialize_history(chat_id, for_request=regeneration)
             chat_session = model.start_chat(history=history)
             response = await asyncio.wait_for(chat_session.send_message_async(parts), timeout=GEMINI_TIMEOUT)
@@ -478,10 +504,6 @@ class Gemini(loader.Module):
             else:
                 if msg_obj:
                     await self.client.send_message(msg_obj.chat_id, error_text, reply_to=msg_obj.id)
-
-    async def _clear_callback(self, call: InlineCall, chat_id: int):
-        self._clear_history(chat_id)
-        await call.edit(self.strings["memory_cleared_cb"], reply_markup=None)
 
     async def _regenerate_callback(self, call: InlineCall, original_message_id: int, chat_id: int):
         last_parts = self.last_requests.get(chat_id)
