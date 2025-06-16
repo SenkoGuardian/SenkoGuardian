@@ -94,7 +94,7 @@ class Gemini(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue("api_key", "", self.strings["cfg_api_key_doc"], validator=loader.validators.Hidden()),
-            loader.ConfigValue("model_name", "gemini-1.5-pro-latest", self.strings["cfg_model_name_doc"]),
+            loader.ConfigValue("model_name", "gemini-2.5-flash-preview-05-20", self.strings["cfg_model_name_doc"]),
             loader.ConfigValue("interactive_buttons", True, self.strings["cfg_buttons_doc"], validator=loader.validators.Boolean()),
             loader.ConfigValue("system_instruction", "", self.strings["cfg_system_instruction_doc"]),
             loader.ConfigValue("max_history_length", 200, self.strings["cfg_max_history_length_doc"], validator=loader.validators.Integer(minimum=0)),
