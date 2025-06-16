@@ -1,6 +1,6 @@
 
 #  This file is part of SenkoGuardianModules
-#  Copyright (c) 2024 Senko
+#  Copyright (c) 2025 Senko
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
