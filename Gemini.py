@@ -4,7 +4,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (4, 0, 0)
+__version__ = (4, 0, 1)
 
 #meta developer: @SenkoGuardianModules
 
@@ -38,12 +38,12 @@ from ..inline.types import InlineCall
 logger = logging.getLogger(__name__)
 
 DB_HISTORY_KEY = "gemini_conversations_v4"
-GEMINI_TIMEOUT = 600
+GEMINI_TIMEOUT = 300
 UNSUPPORTED_MIMETYPES = {"image/gif", "application/x-tgsticker"}
 
 @loader.tds
 class Gemini(loader.Module):
-    """Модуль для работы с Google Gemini AI. (стабильная память и поддержка video/image/audio)"""
+    """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
     strings = {
         "name": "Gemini",
         "cfg_api_key_doc": "API ключ для Google Gemini AI.",
@@ -232,6 +232,18 @@ class Gemini(loader.Module):
             return self.strings["api_error"].format(utils.escape_html(msg))
         if isinstance(e, (OSError, aiohttp.ClientError, socket.timeout)):
             return "❗️ <b>Сетевая ошибка:</b>\n<code>{}</code>".format(utils.escape_html(str(e)))
+        # --- Добавлено: обработка отсутствия API ключа ---
+        msg = str(e)
+        if (
+            "No API_KEY or ADC found" in msg
+            or "GOOGLE_API_KEY environment variable" in msg
+            or "genai.configure(api_key" in msg
+        ):
+            return (
+                "❗️ <b>API ключ не найден.</b>\n"
+                "Получить ключ можно тут: <a href=\"https://aistudio.google.com/apikey\">https://aistudio.google.com/apikey</a>"
+            )
+        # --- Конец добавления ---
         return self.strings["generic_error"].format(utils.escape_html(str(e)))
 
     def _get_model_base(self):
