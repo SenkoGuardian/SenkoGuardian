@@ -1,4 +1,4 @@
-__version__ = (4, 0, 1)
+__version__ = (4, 0, 0)
 
 #meta developer: @SenkoGuardianModules
 
@@ -32,12 +32,12 @@ from ..inline.types import InlineCall
 logger = logging.getLogger(__name__)
 
 DB_HISTORY_KEY = "gemini_conversations_v4"
-GEMINI_TIMEOUT = 300
+GEMINI_TIMEOUT = 600
 UNSUPPORTED_MIMETYPES = {"image/gif", "application/x-tgsticker"}
 
 @loader.tds
 class Gemini(loader.Module):
-    """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
+    """Модуль для работы с Google Gemini AI. (стабильная память и поддержка video/image/audio)"""
     strings = {
         "name": "Gemini",
         "cfg_api_key_doc": "API ключ для Google Gemini AI.",
