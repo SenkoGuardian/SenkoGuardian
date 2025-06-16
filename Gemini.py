@@ -4,7 +4,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (4, 0, 1)
+__version__ = (4, 1, 0)
 
 #meta developer: @SenkoGuardianModules
 
