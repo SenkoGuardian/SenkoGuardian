@@ -206,7 +206,8 @@ class Gemini(loader.Module):
         if max_len > 0 and len(history) > max_len * 2:
             history = history[-(max_len * 2):]
         self.conversations[str(chat_id)] = history
-        self._save_history()
+        asyncio.create_task(self._save_history())  # <-- исправлено
+
     # === Конец памяти ===
 
     def _clear_history(self, chat_id: int):
