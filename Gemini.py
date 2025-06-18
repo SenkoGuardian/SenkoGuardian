@@ -4,7 +4,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (4, 1, 1)
+__version__ = (4, 1, 4)
 
 #meta developer: @SenkoGuardianModules
 
@@ -177,20 +177,20 @@ class Gemini(loader.Module):
             if e.get("role") and e.get("parts")
         ]
 
-    def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False):
+    def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False, message: Message = None):
         if not self._is_memory_enabled(chat_id):
             return
         history = self._get_structured_history(chat_id)
         now = int(asyncio.get_event_loop().time())
+        # --- изменено: извлекаем user_id и message_id из message ---
         user_id = None
         message_id = None
-        if user_parts and hasattr(user_parts[0], "message"):
-            user_id = getattr(user_parts[0].message, "from_id", None)
-            message_id = getattr(user_parts[0].message, "id", None)
+        if message is not None:
+            user_id = getattr(message, "from_id", None)
+            message_id = getattr(message, "id", None)
         user_text = " ".join([p.text for p in user_parts if hasattr(p, 'text') and p.text]) or "[Пользователь отправил медиа]"
         if regeneration:
             # --- Изменено: заменяем последний ответ модели ---
-            # Найти последний элемент с role == "model"
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get("role") == "model":
                     history[i] = {
@@ -201,7 +201,6 @@ class Gemini(loader.Module):
                     }
                     break
             else:
-                # Если не найдено, fallback: добавить как обычно
                 history.append({
                     "role": "model",
                     "type": "text",
@@ -245,6 +244,15 @@ class Gemini(loader.Module):
             return self.strings["api_timeout"]
         if isinstance(e, google_exceptions.GoogleAPIError):
             msg = str(e)
+            # --- Добавлено: обработка ошибки региона ---
+            if "User location is not supported for the API use" in msg or "location is not supported" in msg:
+                return (
+                    "❗️ <b>В данном регионе Gemini API не доступен.</b>\n"
+                    "Скачайте VPN или поставьте прокси (платный/бесплатный).\n"
+                    "Или воспользуйтесь инструкцией <a href=\"https://t.me/SenkoGuardianModules/23\">тут</a> если у вас локалхост.\n"
+                    "Для серверов (ххост, джамхост и прочих) инструкций нет."
+                )
+            # --- Конец добавления ---
             if "API key not valid" in msg:
                 return self.strings["no_api_key"]
             if "blocked" in msg.lower():
@@ -446,7 +454,8 @@ class Gemini(loader.Module):
             history = self._deserialize_history(chat_id, for_request=regeneration)
             chat_session = model.start_chat(history=history)
             response = await asyncio.wait_for(chat_session.send_message_async(parts), timeout=GEMINI_TIMEOUT)
-            self._update_history(chat_id, parts, response.text, regeneration=regeneration)
+            # --- изменено: передаем msg_obj явно ---
+            self._update_history(chat_id, parts, response.text, regeneration=regeneration, message=msg_obj)
             hist_len_pairs = len(self._get_history(chat_id)) // 2
             limit = self.config["max_history_length"]
             mem_indicator = self.strings["memory_status_unlimited"].format(hist_len_pairs) if limit <= 0 else self.strings["memory_status"].format(hist_len_pairs, limit)
@@ -495,7 +504,7 @@ class Gemini(loader.Module):
             error_text = self._handle_error(e)
             if status_msg:
                 asyncio.create_task(self._safe_del_msg(status_msg))
-                await self.client.send_message(message.chat_id, error_text, reply_to=message.id)
+                await self.client.send_message(message.chat_id, error_text, reply_to=message.id, link_preview=False)
             elif self.config["interactive_buttons"]:
                 if call:
                     await call.edit(error_text, reply_markup=None)
@@ -503,7 +512,7 @@ class Gemini(loader.Module):
                     await self.inline.form(message=msg_obj, text=error_text, silent=True)
             else:
                 if msg_obj:
-                    await self.client.send_message(msg_obj.chat_id, error_text, reply_to=msg_obj.id)
+                    await self.client.send_message(msg_obj.chat_id, error_text, reply_to=msg_obj.id, link_preview=False)
 
     async def _regenerate_callback(self, call: InlineCall, original_message_id: int, chat_id: int):
         last_parts = self.last_requests.get(chat_id)
@@ -571,7 +580,34 @@ class Gemini(loader.Module):
         chat_id = utils.get_chat_id(message)
         hist = self._get_structured_history(chat_id)
         import json
-        data = json.dumps(hist, ensure_ascii=False, indent=2)
+
+        # --- Fix: sanitize user_id/message_id for JSON serialization ---
+        def make_serializable(entry):
+            entry = dict(entry)
+            if "user_id" in entry:
+                val = entry["user_id"]
+                # Convert PeerUser/PeerChannel/etc. to int or str
+                if hasattr(val, "user_id"):
+                    entry["user_id"] = val.user_id
+                elif hasattr(val, "channel_id"):
+                    entry["user_id"] = val.channel_id
+                elif hasattr(val, "chat_id"):
+                    entry["user_id"] = val.chat_id
+                elif isinstance(val, (int, str)):
+                    entry["user_id"] = val
+                else:
+                    entry["user_id"] = str(val)
+            if "message_id" in entry:
+                val = entry["message_id"]
+                if isinstance(val, (int, str)):
+                    entry["message_id"] = val
+                else:
+                    entry["message_id"] = str(val)
+            return entry
+
+        serializable_hist = [make_serializable(e) for e in hist]
+
+        data = json.dumps(serializable_hist, ensure_ascii=False, indent=2)
         file = io.BytesIO(data.encode("utf-8"))
         file.name = f"gemini_history_{chat_id}.json"
         await self.client.send_file(message.chat_id, file, caption="Экспорт истории Gemini")
