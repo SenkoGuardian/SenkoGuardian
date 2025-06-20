@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (4, 2, 5) # Исправлено то что ломает db в хостах
+__version__ = (4, 5, 0)
 
 #meta developer: @SenkoGuardianModules
 
@@ -21,6 +21,7 @@ import re
 import os
 import socket
 import aiohttp
+import tempfile
 from telethon import types
 from telethon.tl import types as tl_types
 from telethon.tl.types import Message
@@ -33,7 +34,7 @@ import google.generativeai as genai
 from .. import loader, utils
 from ..inline.types import InlineCall
 
-# requires: google-generativeai google-api-core
+# requires: google-generativeai google-api-core 
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class Gemini(loader.Module):
         "cfg_system_instruction_doc": "Системная инструкция (промпт) для Gemini.",
         "cfg_max_history_length_doc": "Макс. кол-во пар 'вопрос-ответ' в памяти (0 - без лимита).",
         "cfg_proxy_doc": "Прокси для обхода блокировок.",
-        "no_api_key": "❗️ <b>API ключ не настроен.</b>",
+        "no_api_key": '❗️ <b>Ключ Api не настроен.</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.',
         "no_prompt_or_media": "⚠️ <i>Нужен текст или ответ на медиа/файл.</i>",
         "processing": "<emoji document_id=5386367538735104399>⌛️</emoji> <b>Обработка...</b>",
         "api_error": "❗️ <b>Ошибка API Google Gemini:</b>\n<code>{}</code>",
@@ -77,7 +78,6 @@ class Gemini(loader.Module):
         "memory_fully_cleared": "🧹 <b>Вся память Gemini полностью очищена (затронуто {} чатов).</b>",
         "no_memory_to_fully_clear": "ℹ️ <b>Память Gemini и так пуста.</b>",
     }
-
     MODEL_MEDIA_SUPPORT = {
         "gemini-1.5-pro": {"text", "image", "audio", "video"},
         "gemini-1.5-flash": {"text", "image", "audio", "video"},
@@ -246,12 +246,10 @@ class Gemini(loader.Module):
     def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False, message: Message = None):
         if not self._is_memory_enabled(str(chat_id)):
             return
-            
         history = self._get_structured_history(chat_id)
         now = int(asyncio.get_event_loop().time())
         user_id = None
         message_id = None
-        
         if message is not None:
             peer = getattr(message, "from_id", None)
             user_id = get_peer_id(peer) if peer else None 
@@ -297,11 +295,21 @@ class Gemini(loader.Module):
             return self.strings["api_timeout"]
         if isinstance(e, google_exceptions.GoogleAPIError):
             msg = str(e)
+            if "500 An internal error has occurred" in msg or "" in msg:
+                return (
+                    "❗️ <b>Ошибка 500 от Google API.</b>\n"
+                    "Это значит, что формат медиа (файл, анимированный стикер) "
+                    "который ты отправил, не поддерживается.\n"
+                    "Такое случается, по таким причинам:\n"
+                    "  • Если это <b>анимированный стикер (.tgs)</b>.\n"
+                    "  • Если формат файла в принципе не поддерживается Gemini."
+                )
             if "User location is not supported for the API use" in msg or "location is not supported" in msg:
                 return (
                     "❗️ <b>В данном регионе Gemini API не доступен.</b>\n"
                     "Скачайте VPN или поставьте прокси (платный/бесплатный).\n"
                     "Или воспользуйтесь инструкцией <a href=\"https://t.me/SenkoGuardianModules/23\">тут</a> если у вас локалхост.\n"
+                    "Для тех у кого UserLand инструкция <a href=\"https://t.me/SenkoGuardianModules/35\">тут</a>\n"
                     "Для серверов (ххост, джамхост и прочих) инструкций нет."
                 )
             if "API key not valid" in msg:
@@ -344,76 +352,139 @@ class Gemini(loader.Module):
         return None
 
     async def _prepare_parts(self, message: Message):
-        final_parts, warnings = [], []      
+        final_parts, warnings = [], []
         prompt_text_chunks = []
         user_args = utils.get_args_raw(message)
         has_media_in_reply = False
         reply = await message.get_reply_message()
-        if reply:
+        if reply and reply.text:
             try:
                 reply_sender = await reply.get_sender()
                 reply_author_name = get_display_name(reply_sender) if reply_sender else "Unknown"
+                prompt_text_chunks.append(f"{reply_author_name}: {reply.text}")
             except Exception:
-                reply_author_name = "Unknown"
-            if reply.text:
-                if self.strings["response_prefix"] in reply.text and reply_sender and reply_sender.is_self:
-                    try:
-                        clean_text = reply.text.split(self.strings["response_prefix"])[1]
-                        clean_text = re.sub(r'</?blockquote.*?>', '', clean_text).strip()
-                        prompt_text_chunks.append(f"Gemini: {clean_text}")
-                    except Exception: pass
-                else:
-                    prompt_text_chunks.append(f"{reply_author_name}: {reply.text}")            
-            MAX_FILE_SIZE = 4 * 1024 * 1024
-            doc, mime_type = (reply.photo, "image/jpeg") if reply.photo else (reply.document, getattr(reply.document, 'mime_type', 'application/octet-stream')) if reply.document else (None, None)            
-            if doc and mime_type and mime_type not in UNSUPPORTED_MIMETYPES and not any(isinstance(attr, tl_types.DocumentAttributeSticker) for attr in getattr(doc, 'attributes', [])):
-                has_media_in_reply = True
-                try:
-                    byte_io = io.BytesIO()
-                    await self.client.download_media(reply, byte_io)
-                    if byte_io.tell() < MAX_FILE_SIZE:
-                        byte_io.seek(0)
-                        final_parts.append(glm.Part(inline_data=glm.Blob(mime_type=mime_type, data=byte_io.getvalue())))
-                except Exception as e:
-                    warnings.append(f"⚠️ Ошибка обработки медиа: {e}")
+                prompt_text_chunks.append(f"Ответ на: {reply.text}")
         try:
             current_sender = await message.get_sender()
             current_user_name = get_display_name(current_sender) if current_sender else "User"
+            prompt_text_chunks.append(f"{current_user_name}: {user_args or ''}")
         except Exception:
-            current_user_name = "User"
-        current_user_text = user_args
+            prompt_text_chunks.append(f"Запрос: {user_args or ''}")
+        if reply and reply.media:
+            has_media_in_reply = True
+            MAX_FILE_SIZE = 48 * 1024 * 1024
+            media = reply.media
+            mime_type = getattr(getattr(media, "document", None), "mime_type", None) if hasattr(media, "document") else None
+            if mime_type and mime_type.startswith("video/"):
+                input_path, output_path = None, None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_in: input_path = temp_in.name
+                    await self.client.download_media(media, input_path)
+                    ffprobe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", input_path]
+                    process = await asyncio.create_subprocess_exec(*ffprobe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout, _ = await process.communicate()
+                    has_audio = bool(stdout.strip())
+                    video_bytes_to_send = None
+                    if has_audio:
+                        with open(input_path, "rb") as f: video_bytes_to_send = f.read()
+                    else:
+                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_out: output_path = temp_out.name
+                        ffmpeg_cmd = [
+                            "ffmpeg", "-y", "-i", input_path,
+                            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                            "-map", "0:v", "-map", "1:a",
+                            "-c:v", "libx264", "-c:a", "aac",
+                            "-shortest", output_path
+                        ]
+                        process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        _, stderr = await process.communicate()
+                        if process.returncode != 0:
+                            stderr_str = stderr.decode()
+                            if "width not divisible by 2" in stderr_str or "height not divisible by 2" in stderr_str:
+                                warnings.append("⚠️ <b>Ошибка FFmpeg:</b>\nК сожалению, FFmpeg не смог обработать это видео из-за его нестандартных размеров.")
+                            else:
+                                warnings.append(f"⚠️ <b>Ошибка FFmpeg:</b>\n<code>{utils.escape_html(stderr_str)}</code>")
+                            raise StopIteration
+                        with open(output_path, "rb") as f:
+                            video_bytes_to_send = f.read()
+                    if video_bytes_to_send and len(video_bytes_to_send) < MAX_FILE_SIZE:
+                        final_parts.append(glm.Part(inline_data=glm.Blob(mime_type=mime_type, data=video_bytes_to_send)))
+                    elif video_bytes_to_send:
+                        warnings.append(f"⚠️ Видео слишком большое (> {MAX_FILE_SIZE // 1024 // 1024} МБ).")
+                except StopIteration:
+                    pass
+                except Exception as e:
+                    warnings.append(f"⚠️ Ошибка обработки видео: {e}")
+                finally:
+                    if input_path and os.path.exists(input_path): os.remove(input_path)
+                    if output_path and os.path.exists(output_path): os.remove(output_path)
+            else:
+                doc, mime_type = (reply.photo, "image/jpeg") if reply.photo else (reply.document, getattr(reply.document, 'mime_type', 'application/octet-stream')) if reply.document else (None, None)
+                if doc and mime_type and mime_type not in UNSUPPORTED_MIMETYPES:
+                    try:
+                        byte_io = io.BytesIO()
+                        await self.client.download_media(reply.media, byte_io)
+                        if byte_io.tell() < MAX_FILE_SIZE:
+                            byte_io.seek(0)
+                            final_parts.append(glm.Part(inline_data=glm.Blob(mime_type=mime_type, data=byte_io.getvalue())))
+                    except Exception as e:
+                        warnings.append(f"⚠️ Ошибка обработки медиа: {e}")
         if not user_args and has_media_in_reply:
-            current_user_text = self.strings["media_reply_placeholder"]      
-        if current_user_text:
-            prompt_text_chunks.append(f"{current_user_name}: {current_user_text}")
-        full_prompt_text = "\n\n".join(prompt_text_chunks)
+            if not any(chunk.strip() for chunk in prompt_text_chunks):
+                 prompt_text_chunks.append(self.strings["media_reply_placeholder"])
+        full_prompt_text = "\n".join(chunk for chunk in prompt_text_chunks if chunk.strip())
         if full_prompt_text:
-            final_parts.insert(0, glm.Part(text=full_prompt_text))   
+            final_parts.insert(0, glm.Part(text=full_prompt_text))
         return final_parts, warnings
-    
+
     def _markdown_to_html(self, text: str) -> str:
-        code_blocks = {}
-        def _code_block_repl(match):
-            key = f"__CODE_BLOCK_{len(code_blocks)}__"
-            lang = utils.escape_html(match.group(1) or "")
-            code = utils.escape_html(match.group(2))
-            code_blocks[key] = f'<pre language="{lang}">{code}</pre>'
+        text = re.sub(r"````\s*(```[\s\S]+?```)\s*````", r"\1", text, flags=re.DOTALL)
+        text = re.sub(r"``\s*(`.+?`)\s*``", r"\1", text)
+        placeholders = {}
+        placeholder_id = 0
+
+        def fenced_code_repl(match):
+            nonlocal placeholder_id
+            key = f"@@@FENCED_CODE_{placeholder_id}@@@"
+            placeholder_id += 1
+            lang = utils.escape_html(match.group(1).strip())
+            code = utils.escape_html(match.group(2).strip())
+            if lang:
+                placeholders[key] = f'<pre language="{lang}"><code>{code}</code></pre>'
+            else:
+                placeholders[key] = f'<pre><code>{code}</code></pre>'
             return key
-        text = re.sub(r"```(\w*?)\s*\n(.*?)\n`{2,3}", _code_block_repl, text, flags=re.DOTALL)
+        def inline_code_repl(match):
+            nonlocal placeholder_id
+            key = f"@@@INLINE_CODE_{placeholder_id}@@@"
+            placeholder_id += 1
+            code = utils.escape_html(match.group(1).strip())
+            placeholders[key] = f'<code>{code}</code>'
+            return key
+        text = re.sub(r"```(.*?)\n([\s\S]+?)\n```", fenced_code_repl, text)
+        text = re.sub(r"`(.+?)`", inline_code_repl, text)
         text = utils.escape_html(text)
-        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-        text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
-        text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-        text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
-        text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
-        for key, value in code_blocks.items():
-            text = text.replace(utils.escape_html(key), value)
+        text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+        text = re.sub(r"__(.*?)__", r"<u>\1</u>", text)
+        text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+        text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
+        for key, value in placeholders.items():
+            text = text.replace(key, value)
         return text.strip()
 
     def _format_response_with_smart_separation(self, text: str) -> str:
         pattern = r"(<pre.*?>.*?</pre>)"
         parts = re.split(pattern, text, flags=re.DOTALL)
-        return "\n".join(part.strip() if i % 2 == 0 else part for i, part in enumerate(parts))
+        result_parts = []
+        for i, part in enumerate(parts):
+            if not part or part.isspace():
+                continue
+            if i % 2 == 1:
+                result_parts.append(part.strip())
+            else:
+                result_parts.append(f'<blockquote expandable="true">{part.strip()}</blockquote>')
+        return "\n".join(result_parts)
 
     def _get_inline_buttons(self, chat_id, base_message_id):
         return [
@@ -437,18 +508,20 @@ class Gemini(loader.Module):
     @loader.command()
     async def g(self, message: Message):
         """[текст или reply] — спросить у Gemini"""
+        status_msg = None
+        if message.out:
+            status_msg = await utils.answer(message, self.strings["processing"])
+        else:
+            status_msg = await self.client.send_message(message.chat_id, self.strings["processing"])
         parts, warnings = await self._prepare_parts(message)
-        status_msg = await utils.answer(message, self.strings["processing"])
-        if warnings:
-            await status_msg.edit("\n".join(warnings))
-            return
-        if not parts:
-            await status_msg.edit(self.strings["no_prompt_or_media"])
+        if warnings or not parts:
+            err_msg = "\n".join(warnings) if warnings else self.strings["no_prompt_or_media"]
+            await utils.answer(status_msg, err_msg)
             return
         await self._send_to_gemini(message, parts, status_msg=status_msg)
 
     async def _send_to_gemini(self, message, parts: list, regeneration: bool = False, call: InlineCall = None, status_msg=None, chat_id_override: int = None):
-        msg_obj = None        
+        msg_obj = None
         if regeneration:
             chat_id = chat_id_override
             base_message_id = message
@@ -463,7 +536,7 @@ class Gemini(loader.Module):
         try:
             self._configure_proxy()
             if not self.config["api_key"]:
-                await utils.answer(status_msg or msg_obj or message, self.strings['no_api_key'])
+                await utils.answer(status_msg, self.strings['no_api_key'])
                 return
             genai.configure(api_key=self.config["api_key"])
             model = genai.GenerativeModel(
@@ -472,58 +545,83 @@ class Gemini(loader.Module):
                 system_instruction=self.config["system_instruction"].strip() or None
             )
             raw_history = self._get_structured_history(chat_id)
-            if regeneration:
-                raw_history = raw_history[:-2]
-            api_history_content = [
-                glm.Content(role=entry["role"], parts=[glm.Part(text=entry['content'])])
-                for entry in raw_history
-            ]
+            if regeneration: raw_history = raw_history[:-2]
+            api_history_content = [glm.Content(role=e["role"], parts=[glm.Part(text=e['content'])]) for e in raw_history]
             full_request_content = api_history_content
             if regeneration:
                 current_turn_parts, request_text_for_display = self.last_requests.get(f"{chat_id}:{base_message_id}", (parts, "[регенерация]"))
             else:
                 current_turn_parts = parts
-                request_text_for_display = utils.get_args_raw(msg_obj) or (self.strings["media_reply_placeholder"] if "inline_data" in str(parts) else "")
+                request_text_for_display = utils.get_args_raw(msg_obj) or (self.strings["media_reply_placeholder"] if any("inline_data" in str(p) for p in parts) else "")
                 self.last_requests[f"{chat_id}:{base_message_id}"] = (current_turn_parts, request_text_for_display)
             if current_turn_parts:
-                current_turn_content = glm.Content(role="user", parts=current_turn_parts)
-                full_request_content.append(current_turn_content)
+                full_request_content.append(glm.Content(role="user", parts=current_turn_parts))
             if not full_request_content:
                 await utils.answer(status_msg, self.strings["no_prompt_or_media"])
                 return
             response = await asyncio.wait_for(model.generate_content_async(full_request_content), timeout=GEMINI_TIMEOUT)
-            full_user_text_for_history = " ".join([p.text for p in current_turn_parts if hasattr(p, 'text') and p.text])
-
-            if full_user_text_for_history and not regeneration:
-                self._update_history(chat_id, [{"text": full_user_text_for_history}], response.text, regeneration, msg_obj)
-            elif regeneration: 
-                self._update_history(chat_id, [], response.text, regeneration, msg_obj)
+            result_text = ""
+            was_successful = False
+            try:
+                if response.prompt_feedback.block_reason:
+                    reason = response.prompt_feedback.block_reason.name
+                    result_text = (f"🚫 <b>Запрос был заблокирован Google.</b>\n"
+                                f"Причина: <code>{reason}</code>.\n"
+                                f"Это может быть связано с содержимым вашего запроса или историей диалога.")
+            except AttributeError:
+                pass
+            if not result_text:
+                try:
+                    result_text = response.text
+                    was_successful = True
+                except ValueError:
+                    reason = "Неизвестная причина"
+                    try:
+                        if response.candidates:
+                            reason = response.candidates[0].finish_reason.name
+                    except (IndexError, AttributeError):
+                        pass
+                    result_text = f"❗️ Gemini не смог сгенерировать ответ.\nПричина завершения: <code>{reason}</code>."
+            if was_successful and self._is_memory_enabled(str(chat_id)):
+                self._update_history(chat_id, current_turn_parts, result_text, regeneration, msg_obj)
             hist_len_pairs = len(self._get_structured_history(chat_id)) // 2
             limit = self.config["max_history_length"]
             mem_indicator = self.strings["memory_status_unlimited"].format(hist_len_pairs) if limit <= 0 else self.strings["memory_status"].format(hist_len_pairs, limit)
             question_html = f"{utils.escape_html(request_text_for_display[:200])}"
-            response_html = self._markdown_to_html(response.text)
+            response_html = self._markdown_to_html(result_text)
             text_to_send = (f"{mem_indicator}\n\n{self.strings['question_prefix']}\n{question_html}\n\n{self.strings['response_prefix']}\n<blockquote expandable=\"true\">{response_html}</blockquote>")
-            buttons = self._get_inline_buttons(chat_id, base_message_id) if self.config["interactive_buttons"] else None            
-            if call: 
+            buttons = self._get_inline_buttons(chat_id, base_message_id) if self.config["interactive_buttons"] else None
+            if call:
                 await call.edit(text_to_send, reply_markup=buttons)
             elif status_msg:
-                await utils.answer(status_msg, text_to_send, reply_markup=buttons)
-                if message.out: await message.delete()
+                if self.config["interactive_buttons"]:
+                    await utils.answer(status_msg, text_to_send, reply_markup=buttons)
+                    if message.out and not regeneration:
+                        await message.delete()
+                else:
+                    await status_msg.delete()
+                    await self.client.send_message(
+                        chat_id,
+                        text_to_send,
+                        parse_mode="HTML"
+                    )
         except Exception as e:
             error_text = self._handle_error(e)
-            if call: await call.edit(error_text, reply_markup=None)
-            elif status_msg: await utils.answer(status_msg, error_text)
+            if call:
+                await call.edit(error_text, reply_markup=None)
+            elif status_msg:
+                await utils.answer(status_msg, error_text)
+
     async def _regenerate_callback(self, call: InlineCall, original_message_id: int, chat_id: int):
         key = f"{chat_id}:{original_message_id}"
-        last_request_tuple = self.last_requests.get(key)        
+        last_request_tuple = self.last_requests.get(key)
         if not last_request_tuple:
-            return await call.answer(self.strings["no_last_request"], show_alert=True)        
-        last_parts, _ = last_request_tuple        
+            return await call.answer(self.strings["no_last_request"], show_alert=True)
+        last_parts, _ = last_request_tuple
         await self._send_to_gemini(
             message=original_message_id,
             parts=last_parts,
-            regeneration=True,
+            regeneration=True,  
             call=call,
             chat_id_override=chat_id
         )
@@ -549,11 +647,11 @@ class Gemini(loader.Module):
         for chat_id_str in list(self.conversations.keys()):
             if not chat_id_str or not chat_id_str.isdigit():
                 del self.conversations[chat_id_str]
-                continue            
+                continue
             chat_id = int(chat_id_str)
             if chat_id in shown:
                 continue
-            shown.add(chat_id)            
+            shown.add(chat_id)
             try:
                 entity = await self.client.get_entity(chat_id)
                 name = get_display_name(entity)
@@ -607,7 +705,7 @@ class Gemini(loader.Module):
         import json
         def make_serializable(entry):
             entry = dict(entry)
-            user_id = entry.get("user_id")            
+            user_id = entry.get("user_id")
             if user_id:
                 entry["user_name"] = user_names.get(user_id)
 
@@ -619,14 +717,13 @@ class Gemini(loader.Module):
                 entry["user_id"] = str(user_id)
             else:
                 entry["user_id"] = None
-            
             if "message_id" in entry and entry["message_id"] is not None:
                  entry["message_id"] = int(entry["message_id"])
             return entry
         serializable_hist = [make_serializable(e) for e in hist]
         data = json.dumps(serializable_hist, ensure_ascii=False, indent=2)
         file = io.BytesIO(data.encode("utf-8"))
-        file.name = f"gemini_history_{chat_id}.json"        
+        file.name = f"gemini_history_{chat_id}.json"
         await self.client.send_file(
             message.chat_id,
             file,
@@ -695,14 +792,14 @@ class Gemini(loader.Module):
     @loader.command()
     async def gmemdel(self, message: Message):
         """[N] — удалить последние N ПАР сообщений из памяти."""
-        args = utils.get_args_raw(message)        
+        args = utils.get_args_raw(message)
         try:
             n = int(args) if args else 1
         except Exception:
-            n = 1        
+            n = 1
         chat_id = utils.get_chat_id(message)
-        hist = self._get_structured_history(chat_id)        
-        elements_to_remove = n * 2        
+        hist = self._get_structured_history(chat_id)
+        elements_to_remove = n * 2
         if n > 0 and len(hist) >= elements_to_remove:
             hist = hist[:-elements_to_remove]
             self._save_structured_history(chat_id, hist)
@@ -718,7 +815,6 @@ class Gemini(loader.Module):
         if not hist:
             await utils.answer(message, "История пуста.")
             return
-
         out = []
         for e in hist[-40:]:
             role = e.get('role')
@@ -741,17 +837,16 @@ class Gemini(loader.Module):
     def _enable_memory(self, chat_id: int):
         """Включить память для чата."""
         self.memory_disabled_chats.discard(str(chat_id))
+
     @loader.command()
     async def gres(self, message: Message):
         """— Очистить ВСЮ память Gemini во всех чатах."""
         if not self.conversations:
             await utils.answer(message, self.strings["no_memory_to_fully_clear"])
             return
-
         num_chats_affected = len(self.conversations)
         self.conversations.clear()
         self._save_history_sync()
-
         await utils.answer(
             message,
             self.strings["memory_fully_cleared"].format(num_chats_affected)
