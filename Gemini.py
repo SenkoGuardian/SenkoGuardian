@@ -295,7 +295,7 @@ class Gemini(loader.Module):
             return self.strings["api_timeout"]
         if isinstance(e, google_exceptions.GoogleAPIError):
             msg = str(e)
-            if "500 An internal error has occurred" in msg or "" in msg:
+            if "500 An internal error has occurred" in msg:
                 return (
                     "❗️ <b>Ошибка 500 от Google API.</b>\n"
                     "Это значит, что формат медиа (файл, анимированный стикер) "
