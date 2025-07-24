@@ -28,11 +28,7 @@ from telethon import types
 from telethon.tl import types as tl_types
 from telethon.tl.types import Message
 from telethon.utils import get_display_name, get_peer_id
-from telethon.errors.rpcerrorlist import MessageTooLongError
-try:
-    from aiogram.exceptions import TelegramBadRequest
-except ImportError:
-    class TelegramBadRequest(Exception): pass
+from telethon.errors.rpcerrorlist import 
 import google.ai.generativelanguage as glm
 import google.api_core.exceptions as google_exceptions
 import google.generativeai as genai
