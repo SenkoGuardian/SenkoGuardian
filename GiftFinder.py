@@ -8,12 +8,12 @@
 import asyncio
 import random
 import re
-from hikkatl.types import Message, StarGiftUnique
+
 from .. import loader, utils
-from hikkatl.tl.functions.payments import GetSavedStarGiftsRequest
-from hikkatl.tl.functions.channels import GetFullChannelRequest
-from hikkatl.errors.rpcerrorlist import DocumentInvalidError, FloodWaitError, ChatAdminRequiredError
-from telethon.tl.types import Channel
+from herokutl.tl.functions.payments import GetSavedStarGiftsRequest
+from herokutl.tl.functions.channels import GetFullChannelRequest
+from herokutl.tl.types import Message, StarGiftUnique, Channel
+from herokutl.errors.rpcerrorlist import DocumentInvalidError, FloodWaitError, ChatAdminRequiredError
 from telethon.utils import get_display_name
 
 @loader.tds
@@ -35,8 +35,7 @@ class GiftFinderMod(loader.Module):
         "no_users_found": "🚫 <b>В этом чате не найдено пользователей с NFT-подарками.</b>",
     }
 
-    async def _safe_edit(self, msg, text_premium, text_safe):
-        """Пытается отредактировать сообщение с премиум-эмодзи, откатываясь на безопасное.""" # хз, падает а то часто
+    async def _safe_edit(self, msg: Message, text_premium: str, text_safe: str):
         try:
             await msg.edit(text_premium)
         except DocumentInvalidError:
@@ -59,11 +58,15 @@ class GiftFinderMod(loader.Module):
                 if len(parts) > 1 and parts[1].isdigit():
                     msgs_limit = int(parts[1])
         try:
-            msg = await utils.answer(message, self.strings("scanning"))
+            msg = await message.reply(self.strings("scanning"))
         except DocumentInvalidError:
-            msg = await utils.answer(message, self.strings("scanning_safe"))
+            msg = await message.reply(self.strings("scanning_safe"))
         try:
-            chat = await self.client.get_entity(chat_arg) if chat_arg else await message.get_chat()
+            if chat_arg:
+                entity = int(chat_arg) if chat_arg.lstrip('-').isdigit() else chat_arg
+                chat = await self.client.get_entity(entity)
+            else:
+                chat = await message.get_chat()
         except Exception:
             await msg.edit(self.strings("not_a_chat"))
             return
@@ -107,9 +110,11 @@ class GiftFinderMod(loader.Module):
                         found_users.append(f"• {p_icon} {link}  -  {len(gifts)}")
                     break
                 except FloodWaitError as e:
-                    premium_text = self.strings("scanning") + self.strings("flood_wait").format(e.seconds)
-                    safe_text = self.strings("scanning_safe") + self.strings("flood_wait_safe").format(e.seconds)
+                    current_text = (await self.client.get_messages(msg.chat_id, ids=msg.id)).text
+                    premium_text = current_text + self.strings("flood_wait").format(e.seconds)
+                    safe_text = current_text + self.strings("flood_wait_safe").format(e.seconds)
                     await self._safe_edit(msg, premium_text, safe_text)
+                    
                     flood_penalty += 0.2
                     await asyncio.sleep(e.seconds)
                     continue
@@ -118,7 +123,6 @@ class GiftFinderMod(loader.Module):
             await msg.edit(self.strings("no_users_found"))
             return
         user_list = "\n".join(found_users)
-        # ну тут все ясно
         response_text = f"{self.strings('header')}\n<blockquote expandable>{user_list}</blockquote>"
         safe_header = "🔖 " + self.strings("header").split("</emoji>")[1]
         safe_list = [line.replace(self.strings("premium_star"), "⭐️") for line in found_users]
