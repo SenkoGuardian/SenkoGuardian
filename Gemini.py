@@ -51,7 +51,7 @@ class Gemini(loader.Module):
     """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
     strings = {
         "name": "Gemini",
-        "cfg_api_key_doc": "API ключи Google Gemini, разделенные запятой. Будут скрыты.",
+        "cfg_api_key_doc": "API ключи Google Gemini, просто пишете через запятую то есть [ключ1], [ключ2]",
         "cfg_model_name_doc": "Модель Gemini.",
         "cfg_buttons_doc": "Включить интерактивные кнопки.",
         "cfg_system_instruction_doc": "Системная инструкция (промпт) для Gemini.",
