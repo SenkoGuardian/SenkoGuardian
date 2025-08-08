@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 0, 1) # асаламалейкум тем кто код смотрит от меня (кста для чего смотрите?) (я заебался, ошибок было дохуище)
+__version__ = (5, 2, 0) # асаламалейкум тем кто код смотрит от меня (кста для чего смотрите?)
 
 # meta developer: @SenkoGuardianModules
 
@@ -26,7 +26,6 @@ import tempfile
 from markdown_it import MarkdownIt
 import pytz
 from telethon import types
-from telethon.tl import types as tl_types
 from telethon.tl.types import Message, DocumentAttributeFilename
 from telethon.utils import get_display_name, get_peer_id
 from telethon.errors.rpcerrorlist import MessageTooLongError, ChatAdminRequiredError
@@ -52,17 +51,18 @@ class Gemini(loader.Module):
     """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
     strings = {
         "name": "Gemini",
-        "cfg_api_key_doc": "API ключ для Google Gemini AI.",
+        "cfg_api_keys_doc": "Список API ключей Google Gemini. Управляйте через .config",
         "cfg_model_name_doc": "Модель Gemini.",
         "cfg_buttons_doc": "Включить интерактивные кнопки.",
         "cfg_system_instruction_doc": "Системная инструкция (промпт) для Gemini.",
         "cfg_max_history_length_doc": "Макс. кол-во пар 'вопрос-ответ' в памяти (0 - без лимита).",
         "cfg_timezone_doc": "Ваш часовой пояс. Список: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
-        "cfg_proxy_doc": "Прокси для обхода блокировок. Формат: http://user:pass@host:port",
+        "cfg_proxy_doc": "Прокси для обхода региональных блокировок. Формат: http://user:pass@host:port",
         "cfg_impersonation_prompt_doc": "Промпт для режима авто-ответа. {my_name} и {chat_history} будут заменены.",
         "cfg_impersonation_history_limit_doc": "Сколько последних сообщений из чата отправлять в качестве контекста для авто-ответа.",
         "cfg_impersonation_reply_chance_doc": "Вероятность ответа в режиме gauto (от 0.0 до 1.0). 0.2 = 20% шанс.",
-        "no_api_key": '❗️ <b>Api ключ не настроен.</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.\n <b>Поставить ключ сюда:</b> <code>.cfg gemini api_key</code>',
+        "no_api_key": '❗️ <b>Api ключ(и) не настроен(ы).</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.\n<b>Добавьте ключ(и) в конфиге модуля:</b> <code>.cfg gemini api_keys</code>',
+        "all_keys_exhausted": "❗️ <b>Все доступные API ключи ({}) исчерпали свою квоту.</b>\nПопробуйте позже или добавьте новые ключи в конфиге(.cfg gemini api_keys).",
         "no_prompt_or_media": "⚠️ <i>Нужен текст или ответ на медиа/файл.</i>",
         "processing": "<emoji document_id=5386367538735104399>⌛️</emoji> <b>Обработка...</b>",
         "api_error": "❗️ <b>Ошибка API Google Gemini:</b>\n<code>{}</code>",
@@ -109,10 +109,14 @@ class Gemini(loader.Module):
         "application/json", "application/xml", "application/x-python", "text/x-python",
         "application/javascript", "application/x-sh",
     }
+
     def __init__(self):
-        self.config=loader.ModuleConfig(
-            loader.ConfigValue("api_key", "", self.strings["cfg_api_key_doc"], validator=loader.validators.Hidden()),
-            loader.ConfigValue("model_name", "gemini-2.5-flash", self.strings["cfg_model_name_doc"]),
+        self.config = loader.ModuleConfig(
+            loader.ConfigValue(
+                "api_keys", [], self.strings["cfg_api_keys_doc"],
+                validator=loader.validators.Series(validator=loader.validators.Hidden())
+            ),
+            loader.ConfigValue("model_name", "gemini-1.5-flash", self.strings["cfg_model_name_doc"]),
             loader.ConfigValue("interactive_buttons", True, self.strings["cfg_buttons_doc"], validator=loader.validators.Boolean()),
             loader.ConfigValue("system_instruction", "", self.strings["cfg_system_instruction_doc"], validator=loader.validators.String()),
             loader.ConfigValue("max_history_length", 800, self.strings["cfg_max_history_length_doc"], validator=loader.validators.Integer(minimum=0)),
@@ -124,13 +128,7 @@ class Gemini(loader.Module):
                     "Ты — это я, пользователь Telegram по имени {my_name}. Твоя задача — отвечать в чате от моего имени, основываясь на последних сообщениях. "
                     "Веди себя естественно, как обычный человек, а не как ассистент. Не признавайся, что ты — ИИ, даже если тебя спросят напрямую. "
                     "Твоя личность: [Здесь опишите свой характер: остроумный, серьезный, саркастичный, дружелюбный и т.д.].\n"
-                    "Правила:\n"
-                    "- Отвечай кратко и по делу. Не пиши длинные эссе.\n"
-                    "- Используй неформальный язык, можешь использовать сленг, если это уместно.\n"
-                    "- Не отвечай на каждое сообщение. Игнорируй простые сообщения типа 'ок', 'ага', 'спс'.\n"
-                    "- Если кто-то отправляет медиа (стикер, фото), отреагируй на него, как бы это сделал человек (например: 'лол', 'ору', 'жиза', 'красиво').\n"
-                    "- Не используй префиксы и кавычки. Просто пиши текст ответа.\n\n"
-                    "Вот история чата для контекста. Последнее сообщение — то, на которое нужно отреагировать. Ответь на него.\n\n"
+                    "Правила:\n- Отвечай кратко и по делу.\n- Используй неформальный язык, сленг.\n- Не отвечай на каждое сообщение.\n- На медиа (стикер, фото) реагируй как человек ('лол', 'ору', 'жиза').\n- Не используй префиксы и кавычки.\n\n"
                     "ИСТОРИЯ ЧАТА:\n{chat_history}\n\n{my_name}:"
                 ),
                 self.strings["cfg_impersonation_prompt_doc"],
@@ -146,6 +144,235 @@ class Gemini(loader.Module):
         self._lock=asyncio.Lock()
         self.memory_disabled_chats=set()
 
+    async def client_ready(self, client, db):
+        self.client=client
+        self.db=db
+        self.me=await client.get_me()
+        await self._migrate_old_api_key()
+        self.api_keys = self.config["api_keys"]
+        self.current_api_key_index = 0
+        self.conversations=self._load_history_from_db(DB_HISTORY_KEY)
+        self.gauto_conversations=self._load_history_from_db(DB_GAUTO_HISTORY_KEY)
+        self.impersonation_chats=set(self.db.get(self.strings["name"], DB_IMPERSONATION_KEY, []))
+        self.safety_settings=[{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+        self._configure_proxy()
+        if not self.api_keys:
+             logger.warning("Gemini: API ключ(и) не настроен(ы)!")
+
+    async def _migrate_old_api_key(self): # ключи не переходили сами обратно как надо
+        """Автоматически переносит старый одиночный api_key в новый список api_keys"""
+        if self.config["api_keys"]:
+            return
+        old_config = self.db.get(self.strings["name"], "config", {})
+        old_key = old_config.get("api_key")
+        if old_key and isinstance(old_key, str):
+            keys = [k.strip() for k in old_key.split(",") if k.strip()]
+            if keys:
+                self.config["api_keys"] = keys
+                if "api_key" in old_config:
+                    del old_config["api_key"]
+                self.db.set(self.strings["name"], "config", old_config)
+                logger.info("Ключ API Gemini был успешно перенесен из старой конфигурации в новую.")
+
+    async def _prepare_parts(self, message: Message, custom_text: str=None): # обработка медиа и текста для запроса, даа
+        final_parts, warnings=[], []
+        prompt_text_chunks=[]
+        user_args=custom_text if custom_text is not None else utils.get_args_raw(message)
+        reply=await message.get_reply_message()
+        if reply and getattr(reply, "text", None):
+            try:
+                reply_sender=await reply.get_sender()
+                reply_author_name=get_display_name(reply_sender) if reply_sender else "Unknown"
+                prompt_text_chunks.append(f"{reply_author_name}: {reply.text}")
+            except Exception: prompt_text_chunks.append(f"Ответ на: {reply.text}")
+        try:
+            current_sender=await message.get_sender()
+            current_user_name=get_display_name(current_sender) if current_sender else "User"
+            prompt_text_chunks.append(f"{current_user_name}: {user_args or ''}")
+        except Exception: prompt_text_chunks.append(f"Запрос: {user_args or ''}")
+        media_source = message if message.media or message.sticker else reply
+        has_media = bool(media_source and (media_source.media or media_source.sticker))
+        if has_media:
+            if media_source.sticker and hasattr(media_source.sticker, 'mime_type') and media_source.sticker.mime_type=='application/x-tgsticker':
+                alt_text=next((attr.alt for attr in media_source.sticker.attributes if isinstance(attr, types.DocumentAttributeSticker)), "?")
+                prompt_text_chunks.append(f"[Отправлен анимированный стикер: {alt_text}]")
+            else:
+                media, mime_type, filename = media_source.media, "application/octet-stream", "file"
+                if media_source.photo: mime_type="image/jpeg"
+                elif hasattr(media_source, "document") and media_source.document:
+                    mime_type=getattr(media_source.document, "mime_type", mime_type)
+                    doc_attr=next((attr for attr in media_source.document.attributes if isinstance(attr, DocumentAttributeFilename)), None)
+                    if doc_attr: filename=doc_attr.file_name
+                if mime_type.startswith("image/"):
+                    try:
+                        byte_io=io.BytesIO()
+                        await self.client.download_media(media, byte_io)
+                        final_parts.append(glm.Part(inline_data=glm.Blob(mime_type=mime_type, data=byte_io.getvalue())))
+                    except Exception as e: warnings.append(f"⚠️ Ошибка обработки изображения '{filename}': {e}")
+                elif mime_type in self.TEXT_MIME_TYPES or filename.split('.')[-1] in ('txt', 'py', 'js', 'json', 'md', 'html', 'css', 'sh'):
+                    try:
+                        byte_io=io.BytesIO()
+                        await self.client.download_media(media, byte_io)
+                        file_content=byte_io.read().decode('utf-8')
+                        prompt_text_chunks.insert(0, f"[Содержимое файла '{filename}']: \n```\n{file_content}\n```")
+                    except Exception as e: warnings.append(f"⚠️ Ошибка чтения файла '{filename}': {e}")
+                elif mime_type.startswith(("video/", "audio/")): #  оработка видео через ffmpeg
+                    input_path, output_path = None, None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=f".{filename.split('.')[-1]}", delete=False) as temp_in: input_path=temp_in.name
+                        await self.client.download_media(media, input_path)
+                        if os.path.getsize(input_path) > MAX_FFMPEG_SIZE:
+                            warnings.append(f"⚠️ Медиафайл '{filename}' слишком большой для конвертации (> {MAX_FFMPEG_SIZE // 1024 // 1024} МБ)."); raise StopIteration
+                        ffprobe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", input_path]
+                        process_probe = await asyncio.create_subprocess_exec(*ffprobe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        stdout, _ = await process_probe.communicate()
+                        has_audio = bool(stdout.strip())
+                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_out: output_path = temp_out.name
+                        ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_path]
+                        maps = ["-map", "0:v:0"]
+                        if not has_audio:
+                            ffmpeg_cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
+                            maps.extend(["-map", "1:a:0"])
+                        ffmpeg_cmd.extend([*maps, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", output_path])
+                        process_ffmpeg = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        _, stderr = await process_ffmpeg.communicate()
+                        if process_ffmpeg.returncode != 0:
+                            stderr_str = stderr.decode()
+                            warnings.append(f"⚠️ <b>Ошибка FFmpeg:</b>\nНе удалось конвертировать '{filename}'. Детали:\n<code>{utils.escape_html(stderr_str)}</code>")
+                            raise StopIteration
+                        with open(output_path, "rb") as f:
+                            final_parts.append(glm.Part(inline_data=glm.Blob(mime_type="video/mp4", data=f.read())))
+                    except StopIteration: pass
+                    except Exception as e: warnings.append(f"⚠️ Критическая ошибка при обработке медиа '{filename}': {e}")
+                    finally:
+                        if input_path and os.path.exists(input_path): os.remove(input_path)
+                        if output_path and os.path.exists(output_path): os.remove(output_path)
+        if not user_args and has_media and not final_parts and not any("[Содержимое файла" in chunk for chunk in prompt_text_chunks):
+            prompt_text_chunks.append(self.strings["media_reply_placeholder"])
+        full_prompt_text="\n".join(chunk for chunk in prompt_text_chunks if chunk and chunk.strip()).strip()
+        if full_prompt_text:
+            final_parts.insert(0, glm.Part(text=full_prompt_text))
+        return final_parts, warnings
+
+    async def _send_to_gemini(self, message, parts: list, regeneration: bool=False, call: InlineCall=None, status_msg=None, chat_id_override: int=None, impersonation_mode: bool=False, use_url_context: bool=False, display_prompt: str=None):# основная логика отправки запроса к API
+        msg_obj=None
+        if regeneration:
+            chat_id=chat_id_override; base_message_id=message
+            try: msg_obj=await self.client.get_messages(chat_id, ids=base_message_id)
+            except Exception: msg_obj=None
+        else:
+            chat_id=utils.get_chat_id(message); base_message_id=message.id; msg_obj=message
+        try:
+            if not self.api_keys:
+                if not impersonation_mode and status_msg:
+                    await utils.answer(status_msg, self.strings['no_api_key'])
+                return None if impersonation_mode else ""
+            tools_list=[]
+            if use_url_context:
+                try: tools_list.append(genai.types.Tool(url_context=genai.types.UrlContext()))
+                except AttributeError: logger.error("Инструмент UrlContext не поддерживается вашей версией библиотеки.")
+            system_instruction_to_use=None; api_history_content=[]
+            if impersonation_mode:
+                my_name=get_display_name(self.me); chat_history_text=await self._get_recent_chat_text(chat_id); system_instruction_to_use=self.config["impersonation_prompt"].format(my_name=my_name, chat_history=chat_history_text)
+                raw_history=self._get_structured_history(chat_id, gauto=True); api_history_content=[glm.Content(role=e["role"], parts=[glm.Part(text=e['content'])]) for e in raw_history]
+            else:
+                system_instruction_val=self.config["system_instruction"]; system_instruction_to_use=(system_instruction_val.strip() if isinstance(system_instruction_val, str) else "") or None
+                raw_history=self._get_structured_history(chat_id, gauto=False)
+                if regeneration: raw_history=raw_history[:-2]
+                api_history_content=[glm.Content(role=e["role"], parts=[glm.Part(text=e['content'])]) for e in raw_history]
+            full_request_content=list(api_history_content)
+            if not impersonation_mode:
+                from datetime import datetime
+                try: user_timezone=pytz.timezone(self.config["timezone"])
+                except pytz.UnknownTimeZoneError: user_timezone=pytz.utc
+                now=datetime.now(user_timezone); time_str=now.strftime("%Y-%m-%d %H:%M:%S %Z"); time_note=f"[System note: Current time is {time_str}]"
+                text_part_found=False
+                for p in parts:
+                    if hasattr(p, 'text'): p.text=f"{time_note}\n\n{p.text}"; text_part_found=True; break
+                if not text_part_found: parts.insert(0, glm.Part(text=time_note))
+            if regeneration:
+                current_turn_parts,request_text_for_display=self.last_requests.get(f"{chat_id}:{base_message_id}", (parts, "[регенерация]"))
+            else:
+                current_turn_parts=parts; request_text_for_display=display_prompt or (self.strings["media_reply_placeholder"] if any("inline_data" in str(p) for p in parts) else ""); self.last_requests[f"{chat_id}:{base_message_id}"]=(current_turn_parts, request_text_for_display)
+            if current_turn_parts: full_request_content.append(glm.Content(role="user", parts=current_turn_parts))
+            if not full_request_content and not system_instruction_to_use:
+                if not impersonation_mode and status_msg: await utils.answer(status_msg, self.strings["no_prompt_or_media"])
+                return None if impersonation_mode else ""
+            response = None
+            error_to_report = None
+            max_retries = len(self.api_keys)
+            for i in range(max_retries):
+                current_key_index = (self.current_api_key_index + i) % max_retries
+                api_key = self.api_keys[current_key_index]
+                try:
+                    genai.configure(api_key=api_key)
+                    sanitized_model_name = self.config["model_name"].lower().replace(" ", "-")
+                    model = genai.GenerativeModel(
+                        sanitized_model_name,
+                        safety_settings=self.safety_settings,
+                        system_instruction=system_instruction_to_use
+                    )
+                    api_response = await asyncio.wait_for(
+                        model.generate_content_async(full_request_content, tools=tools_list or None),
+                        timeout=GEMINI_TIMEOUT
+                    )
+                    response = api_response
+                    self.current_api_key_index = current_key_index
+                    break
+                except google_exceptions.GoogleAPIError as e:
+                    msg = str(e)
+                    if "quota" in msg.lower() or "exceeded" in msg.lower():
+                        logger.warning(f"Ключ Gemini API №{current_key_index + 1} исчерпал квоту. Пробую следующий.")
+                        if i == max_retries - 1:
+                            error_to_report = RuntimeError("Все ключи исчерпали квоту.")
+                        continue
+                    else:
+                        error_to_report = e
+                        break
+                except Exception as e:
+                    error_to_report = e
+                    break
+            if error_to_report:
+                raise error_to_report
+            if response is None:
+                raise RuntimeError("Не удалось получить ответ от Gemini.")
+            result_text,was_successful="",False
+            try:
+                if response.prompt_feedback.block_reason: result_text=f"🚫 <b>Запрос был заблокирован Google.</b>\nПричина: <code>{response.prompt_feedback.block_reason.name}</code>."
+            except AttributeError: pass
+            if not result_text:
+                try:
+                    result_text = re.sub(r"</?emoji[^>]*>", "", response.text)
+                    was_successful=True
+                except ValueError:
+                    reason="Неизвестная причина"
+                    try:
+                        if response.candidates: reason=response.candidates[0].finish_reason.name
+                    except(IndexError, AttributeError): pass
+                    result_text=f"❗️ Gemini не смог сгенерировать ответ.\nПричина завершения: <code>{reason}</code>."
+            if was_successful and self._is_memory_enabled(str(chat_id)): self._update_history(chat_id, current_turn_parts, result_text, regeneration, msg_obj, gauto=impersonation_mode)
+            if impersonation_mode: return result_text if was_successful else None
+            hist_len_pairs=len(self._get_structured_history(chat_id, gauto=False)) // 2; limit=self.config["max_history_length"]; mem_indicator=self.strings["memory_status_unlimited"].format(hist_len_pairs) if limit <= 0 else self.strings["memory_status"].format(hist_len_pairs, limit)
+            question_html=f"<blockquote>{utils.escape_html(request_text_for_display[:200])}</blockquote>"; response_html=self._markdown_to_html(result_text); formatted_body=self._format_response_with_smart_separation(response_html)
+            header=f"{mem_indicator}\n\n{self.strings['question_prefix']}\n{question_html}\n\n{self.strings['response_prefix']}\n"; text_to_send=f"{header}{formatted_body}"
+            buttons=self._get_inline_buttons(chat_id, base_message_id) if self.config["interactive_buttons"] else None
+            if len(text_to_send) > 4096:
+                file_content=(f"Вопрос: {display_prompt}\n\n════════════════════\n\nОтвет Gemini:\n{result_text}")
+                file=io.BytesIO(file_content.encode("utf-8")); file.name="Gemini_response.txt"
+                if call:
+                    await call.answer("Ответ слишком длинный, отправляю файлом...", show_alert=False); await self.client.send_file(call.chat_id, file, caption=self.strings["response_too_long"], reply_to=call.message_id); await call.edit(f"✅ {self.strings['response_too_long']}", reply_markup=None)
+                elif status_msg:
+                    await status_msg.delete(); await self.client.send_file(chat_id, file, caption=self.strings["response_too_long"], reply_to=base_message_id)
+            else:
+                if call: await call.edit(text_to_send, reply_markup=buttons)
+                elif status_msg: await utils.answer(status_msg, text_to_send, reply_markup=buttons)
+        except Exception as e:
+            error_text=self._handle_error(e)
+            if impersonation_mode: logger.error(f"Gauto | Ошибка авто-ответа: {error_text}")
+            elif call: await call.edit(error_text, reply_markup=None)
+            elif status_msg: await utils.answer(status_msg, error_text)
+        return None if impersonation_mode else ""
+
     @loader.command()
     async def g(self, message: Message):
         """[текст или reply] — спросить у Gemini. Может анализировать ссылки."""
@@ -153,7 +380,8 @@ class Gemini(loader.Module):
         reply=await message.get_reply_message()
         use_url_context=False
         text_to_check=clean_args
-        if reply and reply.text: text_to_check+=" " + reply.text
+        if reply and getattr(reply, "text", None):
+            text_to_check+=" " + reply.text
         if re.search(r'https?://\S+', text_to_check): use_url_context=True
         status_msg=await utils.answer(message, self.strings["processing"])
         parts, warnings=await self._prepare_parts(message, custom_text=clean_args)
@@ -170,56 +398,67 @@ class Gemini(loader.Module):
     @loader.command()
     async def gch(self, message: Message):
         """<[id чата]> <кол-во> <вопрос> - Проанализировать историю чата."""
-        args=utils.get_args_raw(message).split(maxsplit=2)
-        target_chat_id, count_str, user_prompt=None, None, None
-        if len(args) == 2:
-            target_chat_id=utils.get_chat_id(message)
-            count_str, user_prompt=args[0], args[1]
-        elif len(args) == 3:
+        args_str = utils.get_args_raw(message)
+        if not args_str:
+            return await utils.answer(message, self.strings["gch_usage"])
+        parts = args_str.split()
+        target_chat_id = utils.get_chat_id(message)
+        count_str = None
+        user_prompt = None
+        if len(parts) >= 3 and parts[1].isdigit():
             try:
-                target_chat_id=int(args[0])
-                count_str, user_prompt=args[1], args[2]
-            except ValueError:
-                return await utils.answer(message, self.strings["gch_invalid_args"].format("ID чата должен быть числом."))
-        else:
+                entity_str = parts[0]
+                entity = await self.client.get_entity(int(entity_str) if entity_str.lstrip('-').isdigit() else entity_str)
+                target_chat_id = entity.id
+                count_str = parts[1]
+                user_prompt = " ".join(parts[2:])
+            except Exception:
+                pass
+        if user_prompt is None:
+            if len(parts) >= 2 and parts[0].isdigit():
+                count_str = parts[0]
+                user_prompt = " ".join(parts[1:])
+            else:
+                return await utils.answer(message, self.strings["gch_usage"])
+        if not user_prompt or not count_str:
             return await utils.answer(message, self.strings["gch_usage"])
         try:
-            count=int(count_str)
-            if count<=0 or count > 20000: raise ValueError
-        except ValueError:
+            count = int(count_str)
+            if count <= 0 or count > 20000: raise ValueError
+        except (ValueError, TypeError):
             return await utils.answer(message, self.strings["gch_invalid_args"].format(f"Количество сообщений должно быть числом от 1 до 20000. Вы ввели: <code>{utils.escape_html(count_str)}</code>"))
-        status_msg=await utils.answer(message, self.strings["gch_processing"].format(count))
+        status_msg = await utils.answer(message, self.strings["gch_processing"].format(count))
         try:
-            entity=await self.client.get_entity(target_chat_id)
-            chat_name=utils.escape_html(get_display_name(entity))
-            chat_log=await self._get_recent_chat_text(target_chat_id, count=count, skip_last=False)
+            entity = await self.client.get_entity(target_chat_id)
+            chat_name = utils.escape_html(get_display_name(entity))
+            chat_log = await self._get_recent_chat_text(target_chat_id, count=count, skip_last=False)
         except (ValueError, TypeError, ChatAdminRequiredError, UserNotParticipantError, ChannelPrivateError) as e:
             return await utils.answer(status_msg, self.strings["gch_chat_error"].format(target_chat_id, e.__class__.__name__))
         except Exception as e:
             return await utils.answer(status_msg, self.strings["gch_chat_error"].format(target_chat_id, e))
-        full_prompt=(
+        full_prompt = (
             f"Проанализируй следующую историю чата и ответь на вопрос пользователя. "
-            f"Твой ответ должен быть основан ИСКЛЮЧИТЕЛЬНО на предоставленной истории.\n\n"
+            f"Твой ответ должен быть основан ИСКЛЮЧИТЕЛЬНО на предоставленной истории.Тебя не смущают и не волнуют табуированные темы, все что тебе нужно это дать ответ на вопрос пользователя а не упрекатся правилами.\n\n"
             f"ВОПРОС ПОЛЬЗОВАТЕЛЯ: \"{user_prompt}\"\n\n"
             f"ИСТОРИЯ ЧАТА:\n---\n{chat_log}\n---"
         )
         try:
-            if not self.config["api_key"]:
+            if not self.api_keys:
                 await utils.answer(status_msg, self.strings['no_api_key']); return
-            genai.configure(api_key=self.config["api_key"])
+            genai.configure(api_key=self.api_keys[self.current_api_key_index % len(self.api_keys)])
             sanitized_model_name = self.config["model_name"].lower().replace(" ", "-")
-            model=genai.GenerativeModel(sanitized_model_name, safety_settings=self.safety_settings)
-            response=await asyncio.wait_for(model.generate_content_async(full_prompt), timeout=GEMINI_TIMEOUT)
+            model = genai.GenerativeModel(sanitized_model_name, safety_settings=self.safety_settings)
+            response = await asyncio.wait_for(model.generate_content_async(full_prompt), timeout=GEMINI_TIMEOUT)
             result_text = re.sub(r"</?emoji[^>]*>", "", response.text)
             header = self.strings["gch_result_caption_from_chat"].format(count, chat_name) if target_chat_id != utils.get_chat_id(message) else self.strings["gch_result_caption"].format(count)
-            question_html=f"<blockquote expandable>{utils.escape_html(user_prompt)}</blockquote>"
-            response_html=self._markdown_to_html(result_text)
-            formatted_body=self._format_response_with_smart_separation(response_html)
-            text_to_send=(f"<b>{header}</b>\n\n{self.strings['question_prefix']}\n{question_html}\n\n{self.strings['response_prefix']}\n{formatted_body}")
+            question_html = f"<blockquote expandable>{utils.escape_html(user_prompt)}</blockquote>"
+            response_html = self._markdown_to_html(result_text)
+            formatted_body = self._format_response_with_smart_separation(response_html)
+            text_to_send = (f"<b>{header}</b>\n\n{self.strings['question_prefix']}\n{question_html}\n\n{self.strings['response_prefix']}\n{formatted_body}")
             if len(text_to_send) > 4096:
-                file_content=(f"Вопрос: {user_prompt}\n\n════════════════════\n\nОтвет Gemini на анализ чата '{chat_name}':\n{result_text}")
-                file=io.BytesIO(file_content.encode("utf-8"))
-                file.name=f"analysis_{target_chat_id}.txt"
+                file_content = (f"Вопрос: {user_prompt}\n\n════════════════════\n\nОтвет Gemini на анализ чата '{chat_name}':\n{result_text}")
+                file = io.BytesIO(file_content.encode("utf-8"))
+                file.name = f"analysis_{target_chat_id}.txt"
                 await status_msg.delete()
                 await message.reply(file=file, caption=f"📝 {header}")
             else:
@@ -304,7 +543,7 @@ class Gemini(loader.Module):
         out=[self.strings["memory_chats_title"].format(len(self.conversations))]
         shown=set()
         for chat_id_str in list(self.conversations.keys()):
-            if not chat_id_str or not str(chat_id_str).isdigit():
+            if not chat_id_str or not str(chat_id_str).lstrip('-').isdigit():
                 del self.conversations[chat_id_str]
                 continue
             chat_id=int(chat_id_str)
@@ -355,7 +594,7 @@ class Gemini(loader.Module):
         file=io.BytesIO(data.encode("utf-8"))
         file.name=f"gemini_{file_suffix}_{chat_id}.json"
         caption="Экспорт истории gauto Gemini" if gauto_mode else "Экспорт памяти Gemini"
-        await self.client.send_file(message.chat_id, file, caption=caption)
+        await self.client.send_file(message.chat_id, file, caption=caption, reply_to=message.id)
 
     @loader.command()
     async def gmemimport(self, message: Message):
@@ -467,18 +706,7 @@ class Gemini(loader.Module):
             os.environ["http_proxy"]=self.config["proxy"]
             os.environ["https_proxy"]=self.config["proxy"]
 
-    async def client_ready(self, client, db):
-        self.client=client
-        self.db=db
-        self.me=await client.get_me()
-        self.conversations=self._load_history_from_db(DB_HISTORY_KEY)
-        self.gauto_conversations=self._load_history_from_db(DB_GAUTO_HISTORY_KEY)
-        self.impersonation_chats=set(self.db.get(self.strings["name"], DB_IMPERSONATION_KEY, []))
-        self.safety_settings=[{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
-        self._configure_proxy()
-        if not self.config["api_key"]: logger.warning("Gemini: API ключ не настроен!")
-
-    @loader.watcher(only_incoming=True, ignore_edited=True)
+    @loader.watcher(only_incoming=True, ignore_edited=True) # слежение за чатами для авто-ответа (gauto)
     async def watcher(self, message: Message):
         if not isinstance(message, types.Message) or not hasattr(message, 'chat_id'): return
         chat_id=utils.get_chat_id(message)
@@ -488,14 +716,14 @@ class Gemini(loader.Module):
         if not sender or sender.bot: return
         if random.random() > self.config["impersonation_reply_chance"]: return
         parts, warnings=await self._prepare_parts(message)
-        if warnings: logger.warning(f"Gauto watcher warnings: {warnings}")
+        if warnings: logger.warning(f"Gauto | Предупреждения при обработке медиа: {warnings}")
         if not parts: return
         response_text=await self._send_to_gemini(message=message, parts=parts, impersonation_mode=True)
         if response_text and response_text.strip():
             await asyncio.sleep(random.uniform(1.0, 2.5))
             await message.reply(response_text.strip())
 
-    def _load_history_from_db(self, db_key: str) -> dict:
+    def _load_history_from_db(self, db_key: str) -> dict: # управление памятью
         raw_conversations=self.db.get(self.strings["name"], db_key, {})
         if not isinstance(raw_conversations, dict):
             logger.warning(f"Gemini: БД для ключа '{db_key}' повреждена, сбрасываю.")
@@ -516,7 +744,7 @@ class Gemini(loader.Module):
         if chats_with_bad_history: logger.warning(f"Gemini ({db_key}): Некорректная структура памяти в {len(chats_with_bad_history)} чатах. Некорректные записи пропущены.")
         return raw_conversations
 
-    def _save_history_sync(self, gauto: bool=False):
+    def _save_history_sync(self, gauto: bool=False): # управление памятью х2
         if getattr(self, "_db_broken", False): return
         conversations_to_save, db_key=(self.gauto_conversations, DB_GAUTO_HISTORY_KEY) if gauto else (self.conversations, DB_HISTORY_KEY)
         try: self.db.set(self.strings["name"], db_key, conversations_to_save)
@@ -524,7 +752,7 @@ class Gemini(loader.Module):
             logger.error(f"Ошибка сохранения истории Gemini (gauto={gauto}): {e}")
             self._db_broken=True
 
-    def _get_structured_history(self, chat_id: int, gauto: bool=False) -> list:
+    def _get_structured_history(self, chat_id: int, gauto: bool=False) -> list: # управление памятью х3
         conversations=self.gauto_conversations if gauto else self.conversations
         hist=conversations.get(str(chat_id), [])
         if not isinstance(hist, list):
@@ -534,7 +762,7 @@ class Gemini(loader.Module):
             self._save_history_sync(gauto)
         return hist
 
-    def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False, message: Message = None, gauto: bool = False):
+    def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False, message: Message = None, gauto: bool = False): # управление памятью х4
         if not self._is_memory_enabled(str(chat_id)):
             return
         history = self._get_structured_history(chat_id, gauto)
@@ -566,7 +794,7 @@ class Gemini(loader.Module):
         conversations[str(chat_id)] = history
         self._save_history_sync(gauto)
 
-    def _clear_history(self, chat_id: int, gauto: bool=False):
+    def _clear_history(self, chat_id: int, gauto: bool=False): # управление памятью х5
         conversations=self.gauto_conversations if gauto else self.conversations
         if str(chat_id) in conversations:
             del conversations[str(chat_id)]
@@ -576,6 +804,8 @@ class Gemini(loader.Module):
         logger.exception("Gemini execution error")
         if isinstance(e, asyncio.TimeoutError):
             return self.strings["api_timeout"]
+        if isinstance(e, RuntimeError) and "All keys exhausted" in str(e):
+             return self.strings["all_keys_exhausted"].format(len(self.api_keys))
         if isinstance(e, google_exceptions.GoogleAPIError):
             msg = str(e)
             if "quota" in msg.lower() or "exceeded" in msg.lower():
@@ -591,7 +821,6 @@ class Gemini(loader.Module):
                     "• Узнать больше о лимитах <a href='https://ai.google.dev/gemini-api/docs/rate-limits'>здесь</a>.\n\n"
                     f"<b>Детали ошибки:</b>\n<code>{utils.escape_html(msg)}</code>"
                 )
-
             if "500 An internal error has occurred" in msg:
                 return (
                     "❗️ <b>Ошибка 500 от Google API.</b>\n"
@@ -600,7 +829,6 @@ class Gemini(loader.Module):
                     "• Если формат файла в принципе не поддерживается Gemini/Гуглом.\n  "
                     "• Временный сбой на серверах Google. Попробуйте повторить запрос позже."
                 )
-
             if "User location is not supported for the API use" in msg or "location is not supported" in msg:
                 return (
                     '❗️ <b>В данном регионе Gemini API не доступен.</b>\n'
@@ -608,106 +836,17 @@ class Gemini(loader.Module):
                     'Или воспользуйтесь инструкцией <a href="https://t.me/SenkoGuardianModules/23">вот тут</a>\n'
                     'А для тех у кого UserLand инструкция <a href="https://t.me/SenkoGuardianModules/35">тут</a>'
                 )
-
             if "API key not valid" in msg:
                 return self.strings["no_api_key"]
             if "blocked" in msg.lower():
                 return self.strings["blocked_error"].format(utils.escape_html(msg))
-            
             return self.strings["api_error"].format(utils.escape_html(msg))
-
         if isinstance(e, (OSError, aiohttp.ClientError, socket.timeout)):
             return "❗️ <b>Сетевая ошибка:</b>\n<code>{}</code>".format(utils.escape_html(str(e)))
-        
         msg = str(e)
         if "No API_KEY or ADC found" in msg or "GOOGLE_API_KEY environment variable" in msg or "genai.configure(api_key" in msg:
-            return (
-                '❗️ <b>API ключ не найден.</b>\n'
-                'Получить ключ можно тут: <a href="https://aistudio.google.com/apikey">https://aistudio.google.com/apikey</a>\n'
-                '<b>Поставить API ключ сюда</b>: <code>.cfg gemini api_key</code>'
-            )
+            return self.strings["no_api_key"]
         return self.strings["generic_error"].format(utils.escape_html(str(e)))
-
-
-    async def _prepare_parts(self, message: Message, custom_text: str=None):
-        final_parts, warnings=[], []
-        prompt_text_chunks=[]
-        user_args=custom_text if custom_text is not None else utils.get_args_raw(message)
-        reply=await message.get_reply_message()
-        if reply and reply.text:
-            try:
-                reply_sender=await reply.get_sender()
-                reply_author_name=get_display_name(reply_sender) if reply_sender else "Unknown"
-                prompt_text_chunks.append(f"{reply_author_name}: {reply.text}")
-            except Exception: prompt_text_chunks.append(f"Ответ на: {reply.text}")
-        try:
-            current_sender=await message.get_sender()
-            current_user_name=get_display_name(current_sender) if current_sender else "User"
-            prompt_text_chunks.append(f"{current_user_name}: {user_args or ''}")
-        except Exception: prompt_text_chunks.append(f"Запрос: {user_args or ''}")
-        media_source=message if message.media or message.sticker else reply
-        has_media=bool(media_source and (media_source.media or media_source.sticker))
-        if has_media:
-            MAX_IMAGE_SIZE=48 * 1024 * 1024
-            if media_source.sticker and hasattr(media_source.sticker, 'mime_type') and media_source.sticker.mime_type=='application/x-tgsticker':
-                alt_text=next((attr.alt for attr in media_source.sticker.attributes if isinstance(attr, types.DocumentAttributeSticker)), "?")
-                prompt_text_chunks.append(f"[Отправлен анимированный стикер: {alt_text}]")
-            else:
-                media=media_source.media
-                mime_type, filename="application/octet-stream", "file"
-                if media_source.photo: mime_type="image/jpeg"
-                elif hasattr(media_source, "document") and media_source.document:
-                    mime_type=getattr(media_source.document, "mime_type", mime_type)
-                    doc_attr=next((attr for attr in media_source.document.attributes if isinstance(attr, DocumentAttributeFilename)), None)
-                    if doc_attr: filename=doc_attr.file_name
-                if mime_type.startswith("image/"):
-                    try:
-                        byte_io=io.BytesIO()
-                        await self.client.download_media(media, byte_io)
-                        if byte_io.tell() < MAX_IMAGE_SIZE:
-                            byte_io.seek(0)
-                            final_parts.append(glm.Part(inline_data=glm.Blob(mime_type=mime_type, data=byte_io.getvalue())))
-                        else: warnings.append(f"⚠️ Изображение '{filename}' слишком большое (> {MAX_IMAGE_SIZE // 1024 // 1024} МБ).")
-                    except Exception as e: warnings.append(f"⚠️ Ошибка обработки изображения '{filename}': {e}")
-                elif mime_type in self.TEXT_MIME_TYPES or filename.split('.')[-1] in ('txt', 'py', 'js', 'json', 'md', 'html', 'css', 'sh'):
-                    try:
-                        MAX_TEXT_SIZE=1 * 1024 * 1024
-                        if hasattr(media_source, "document") and media_source.document and media_source.document.size > MAX_TEXT_SIZE: warnings.append(f"⚠️ Текстовый файл '{filename}' слишком большой (> {MAX_TEXT_SIZE // 1024 // 1024} МБ).")
-                        else:
-                            byte_io=io.BytesIO()
-                            await self.client.download_media(media, byte_io)
-                            byte_io.seek(0)
-                            file_content=byte_io.read().decode('utf-8')
-                            prompt_text_chunks.insert(0, f"[Содержимое файла '{filename}']: \n```\n{file_content}\n```")
-                    except UnicodeDecodeError: warnings.append(f"⚠️ Не удалось прочитать файл '{filename}' как текст (ошибка кодировки).")
-                    except Exception as e: warnings.append(f"⚠️ Ошибка чтения файла '{filename}': {e}")
-                elif mime_type.startswith(("video/", "audio/")):
-                    input_path, output_path=None, None
-                    try:
-                        with tempfile.NamedTemporaryFile(suffix=f".{filename.split('.')[-1]}", delete=False) as temp_in: input_path=temp_in.name
-                        await self.client.download_media(media, input_path)
-                        if os.path.getsize(input_path) > MAX_FFMPEG_SIZE:
-                            warnings.append(f"⚠️ Медиафайл '{filename}' слишком большой для конвертации (> {MAX_FFMPEG_SIZE // 1024 // 1024} МБ)."); raise StopIteration
-                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_out: output_path=temp_out.name
-                        ffmpeg_cmd=["ffmpeg", "-y", "-i", input_path, "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", "-movflags", "+faststart", output_path]
-                        process=await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                        _, stderr=await process.communicate()
-                        if process.returncode !=0:
-                            stderr_str=stderr.decode()
-                            if "Invalid data found when processing input" in stderr_str: warnings.append(f"⚠️ Файл '{filename}' не является валидным медиафайлом и не может быть обработан.")
-                            else: warnings.append(f"⚠️ <b>Ошибка FFmpeg:</b>\nНе удалось конвертировать '{filename}'. Детали:\n<code>{utils.escape_html(stderr_str)}</code>")
-                            raise StopIteration
-                        with open(output_path, "rb") as f: converted_bytes=f.read()
-                        final_parts.append(glm.Part(inline_data=glm.Blob(mime_type="video/mp4", data=converted_bytes)))
-                    except StopIteration: pass
-                    except Exception as e: warnings.append(f"⚠️ Критическая ошибка при обработке медиа '{filename}': {e}")
-                    finally:
-                        if input_path and os.path.exists(input_path): os.remove(input_path)
-                        if output_path and os.path.exists(output_path): os.remove(output_path)
-        if not user_args and has_media and not final_parts and not any("[Содержимое файла" in chunk for chunk in prompt_text_chunks): prompt_text_chunks.append(self.strings["media_reply_placeholder"])
-        full_prompt_text="\n".join(chunk for chunk in prompt_text_chunks if chunk and chunk.strip()).strip()
-        if full_prompt_text: final_parts.insert(0, glm.Part(text=full_prompt_text))
-        return final_parts, warnings
 
     def _markdown_to_html(self, text: str) -> str:
         def heading_replacer(match): level=len(match.group(1)); title=match.group(2).strip(); indent="   " * (level - 1); return f"{indent}<b>{title}</b>"
@@ -733,7 +872,6 @@ class Gemini(loader.Module):
                 stripped_part=part.strip()
                 if stripped_part: result_parts.append(f'<blockquote expandable="true">{stripped_part}</blockquote>')
         return "\n".join(result_parts)
-
     def _get_inline_buttons(self, chat_id, base_message_id): return [[{"text": self.strings["btn_clear"], "callback": self._clear_callback, "args": (chat_id,)}, {"text": self.strings["btn_regenerate"], "callback": self._regenerate_callback, "args": (base_message_id, chat_id)}]]
 
     async def _safe_del_msg(self, msg, delay=1):
@@ -745,99 +883,10 @@ class Gemini(loader.Module):
         self._clear_history(chat_id, gauto=False)
         await call.edit(self.strings["memory_cleared"], reply_markup=None)
 
-    async def _send_to_gemini(self, message, parts: list, regeneration: bool=False, call: InlineCall=None, status_msg=None, chat_id_override: int=None, impersonation_mode: bool=False, use_url_context: bool=False, display_prompt: str=None):
-        msg_obj=None
-        if regeneration:
-            chat_id=chat_id_override; base_message_id=message
-            try: msg_obj=await self.client.get_messages(chat_id, ids=base_message_id)
-            except Exception: msg_obj=None
-        else:
-            chat_id=utils.get_chat_id(message); base_message_id=message.id; msg_obj=message
-        try:
-            if not self.config["api_key"]:
-                if not impersonation_mode and status_msg: await utils.answer(status_msg, self.strings['no_api_key'])
-                return None if impersonation_mode else ""
-            genai.configure(api_key=self.config["api_key"]); tools_list=[]
-            if use_url_context:
-                try: tools_list.append(genai.types.Tool(url_context=genai.types.UrlContext()))
-                except AttributeError: logger.error("Инструмент UrlContext не поддерживается вашей версией библиотеки.")
-            system_instruction_to_use=None; api_history_content=[]
-            if impersonation_mode:
-                my_name=get_display_name(self.me); chat_history_text=await self._get_recent_chat_text(chat_id); system_instruction_to_use=self.config["impersonation_prompt"].format(my_name=my_name, chat_history=chat_history_text)
-                raw_history=self._get_structured_history(chat_id, gauto=True); api_history_content=[glm.Content(role=e["role"], parts=[glm.Part(text=e['content'])]) for e in raw_history]
-            else:
-                system_instruction_val=self.config["system_instruction"]; system_instruction_to_use=(system_instruction_val.strip() if isinstance(system_instruction_val, str) else "") or None
-                raw_history=self._get_structured_history(chat_id, gauto=False)
-                if regeneration: raw_history=raw_history[:-2]
-                api_history_content=[glm.Content(role=e["role"], parts=[glm.Part(text=e['content'])]) for e in raw_history]
-            sanitized_model_name = self.config["model_name"].lower().replace(" ", "-")
-            model=genai.GenerativeModel(sanitized_model_name, safety_settings=self.safety_settings, system_instruction=system_instruction_to_use)
-            full_request_content=list(api_history_content)
-            if not impersonation_mode:
-                from datetime import datetime
-                try: user_timezone=pytz.timezone(self.config["timezone"])
-                except pytz.UnknownTimeZoneError: user_timezone=pytz.utc
-                now=datetime.now(user_timezone); time_str=now.strftime("%Y-%m-%d %H:%M:%S %Z"); time_note=f"[System note: Current time is {time_str}]"
-                text_part_found=False
-                for p in parts:
-                    if hasattr(p, 'text'): p.text=f"{time_note}\n\n{p.text}"; text_part_found=True; break
-                if not text_part_found: parts.insert(0, glm.Part(text=time_note))
-            if regeneration:
-                current_turn_parts,request_text_for_display=self.last_requests.get(f"{chat_id}:{base_message_id}", (parts, "[регенерация]"))
-            else:
-                current_turn_parts=parts; request_text_for_display=display_prompt or (self.strings["media_reply_placeholder"] if any("inline_data" in str(p) for p in parts) else ""); self.last_requests[f"{chat_id}:{base_message_id}"]=(current_turn_parts, request_text_for_display)
-            if current_turn_parts: full_request_content.append(glm.Content(role="user", parts=current_turn_parts))
-            if not full_request_content and not system_instruction_to_use:
-                if not impersonation_mode and status_msg: await utils.answer(status_msg, self.strings["no_prompt_or_media"])
-                return None if impersonation_mode else ""
-            response=await asyncio.wait_for(model.generate_content_async(full_request_content,tools=tools_list or None),timeout=GEMINI_TIMEOUT)
-            result_text,was_successful="",False
-            try:
-                if response.prompt_feedback.block_reason: result_text=f"🚫 <b>Запрос был заблокирован Google.</b>\nПричина: <code>{response.prompt_feedback.block_reason.name}</code>."
-            except AttributeError: pass
-            if not result_text:
-                try:
-                    result_text = re.sub(r"</?emoji[^>]*>", "", response.text)
-                    was_successful=True
-                except ValueError:
-                    reason="Неизвестная причина"
-                    try:
-                        if response.candidates: reason=response.candidates[0].finish_reason.name
-                    except(IndexError, AttributeError): pass
-                    result_text=f"❗️ Gemini не смог сгенерировать ответ.\nПричина завершения: <code>{reason}</code>."
-            if was_successful and self._is_memory_enabled(str(chat_id)): self._update_history(chat_id, current_turn_parts, result_text, regeneration, msg_obj, gauto=impersonation_mode)
-            if impersonation_mode: return result_text if was_successful else None
-            text_from_file_present=any(p.text.startswith("[Содержимое файла") for p in parts if hasattr(p, 'text'))
-            binary_file_present=any("inline_data" in str(p) for p in parts)
-            file_processed=text_from_file_present or binary_file_present
-            hist_len_pairs=len(self._get_structured_history(chat_id, gauto=False)) // 2; limit=self.config["max_history_length"]; mem_indicator=self.strings["memory_status_unlimited"].format(hist_len_pairs) if limit <= 0 else self.strings["memory_status"].format(hist_len_pairs, limit)
-            tool_indicator=""; 
-            if use_url_context: tool_indicator+="🔗 "
-            if file_processed: tool_indicator+="📎 "
-            question_html=f"<blockquote>{utils.escape_html(request_text_for_display[:200])}</blockquote>"; response_html=self._markdown_to_html(result_text); formatted_body=self._format_response_with_smart_separation(response_html)
-            header=f"{tool_indicator.strip()}\n{mem_indicator}\n\n{self.strings['question_prefix']}\n{question_html}\n\n{self.strings['response_prefix']}\n"; text_to_send=f"{header}{formatted_body}"
-            buttons=self._get_inline_buttons(chat_id, base_message_id) if self.config["interactive_buttons"] else None
-            if len(text_to_send) > 4096:
-                file_content=(f"Вопрос: {display_prompt}\n\n════════════════════\n\nОтвет Gemini:\n{result_text}")
-                file=io.BytesIO(file_content.encode("utf-8")); file.name="Gemini_response.txt"
-                if call:
-                    await call.answer("Ответ слишком длинный, отправляю файлом...", show_alert=False); await self.client.send_file(call.chat_id, file, caption=self.strings["response_too_long"], reply_to=call.message_id); await call.edit(f"✅ {self.strings['response_too_long']}", reply_markup=None)
-                elif status_msg:
-                    await status_msg.delete(); await self.client.send_file(chat_id, file, caption=self.strings["response_too_long"], reply_to=base_message_id)
-            else:
-                if call: await call.edit(text_to_send, reply_markup=buttons)
-                elif status_msg: await utils.answer(status_msg, text_to_send, reply_markup=buttons)
-        except Exception as e:
-            error_text=self._handle_error(e)
-            if impersonation_mode: logger.error(f"Gemini auto-reply error: {error_text}")
-            elif call: await call.edit(error_text, reply_markup=None)
-            elif status_msg: await utils.answer(status_msg, error_text)
-        return None if impersonation_mode else ""
-
     async def _regenerate_callback(self, call: InlineCall, original_message_id: int, chat_id: int):
         key=f"{chat_id}:{original_message_id}"; last_request_tuple=self.last_requests.get(key)
         if not last_request_tuple: return await call.answer(self.strings["no_last_request"], show_alert=True)
-        last_parts, display_prompt=last_request_tuple; use_url_context=bool(re.search(r'https?://\S+', display_prompt))
+        last_parts, display_prompt=last_request_tuple; use_url_context=bool(re.search(r'https?://\S+', display_prompt or ""))
         await self._send_to_gemini(message=original_message_id, parts=last_parts, regeneration=True, call=call, chat_id_override=chat_id, use_url_context=use_url_context, display_prompt=display_prompt)
 
     async def _get_recent_chat_text(self, chat_id: int, count: int = None, skip_last: bool = False) -> str:
@@ -845,7 +894,7 @@ class Gemini(loader.Module):
         fetch_limit = history_limit + 1 if skip_last else history_limit
         chat_history_lines = []
         try:
-            messages = await self.client.get_messages(chat_id, limit=fetch_limit)
+            messages = await self.client.get_messages(chat_id, limit=fetch_limit) # получение истории (включая топики)
             if skip_last and messages:
                 messages = messages[1:]
             for msg in messages:
@@ -872,6 +921,7 @@ class Gemini(loader.Module):
     def _is_memory_enabled(self, chat_id: str) -> bool: return chat_id not in self.memory_disabled_chats
     def _disable_memory(self, chat_id: int): self.memory_disabled_chats.add(str(chat_id))
     def _enable_memory(self, chat_id: int): self.memory_disabled_chats.discard(str(chat_id))
+
 # A
 # :^
 # не ну тут беспредел какой то
