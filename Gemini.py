@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 2, 0) # асаламалейкум тем кто код смотрит от меня (кста для чего смотрите?)
+__version__ = (5, 2, 1) # pew pew pew
 
 # meta developer: @SenkoGuardianModules
 
@@ -51,7 +51,7 @@ class Gemini(loader.Module):
     """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
     strings = {
         "name": "Gemini",
-        "cfg_api_keys_doc": "Список API ключей Google Gemini. Управляйте через .config",
+        "cfg_api_key_doc": "API ключи Google Gemini, разделенные запятой. Будут скрыты.",
         "cfg_model_name_doc": "Модель Gemini.",
         "cfg_buttons_doc": "Включить интерактивные кнопки.",
         "cfg_system_instruction_doc": "Системная инструкция (промпт) для Gemini.",
@@ -61,8 +61,8 @@ class Gemini(loader.Module):
         "cfg_impersonation_prompt_doc": "Промпт для режима авто-ответа. {my_name} и {chat_history} будут заменены.",
         "cfg_impersonation_history_limit_doc": "Сколько последних сообщений из чата отправлять в качестве контекста для авто-ответа.",
         "cfg_impersonation_reply_chance_doc": "Вероятность ответа в режиме gauto (от 0.0 до 1.0). 0.2 = 20% шанс.",
-        "no_api_key": '❗️ <b>Api ключ(и) не настроен(ы).</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.\n<b>Добавьте ключ(и) в конфиге модуля:</b> <code>.cfg gemini api_keys</code>',
-        "all_keys_exhausted": "❗️ <b>Все доступные API ключи ({}) исчерпали свою квоту.</b>\nПопробуйте позже или добавьте новые ключи в конфиге(.cfg gemini api_keys).",
+        "no_api_key": '❗️ <b>Api ключ(и) не настроен(ы).</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.\n<b>Добавьте ключ(и) в конфиге модуля:</b> <code>.cfg gemini api_key</code>',
+        "all_keys_exhausted": "❗️ <b>Все доступные API ключи ({}) исчерпали свою квоту.</b>\nПопробуйте позже или добавьте новые ключи в конфиге: <code>.cfg gemini api_key</code>",
         "no_prompt_or_media": "⚠️ <i>Нужен текст или ответ на медиа/файл.</i>",
         "processing": "<emoji document_id=5386367538735104399>⌛️</emoji> <b>Обработка...</b>",
         "api_error": "❗️ <b>Ошибка API Google Gemini:</b>\n<code>{}</code>",
@@ -113,8 +113,8 @@ class Gemini(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue(
-                "api_keys", [], self.strings["cfg_api_keys_doc"],
-                validator=loader.validators.Series(validator=loader.validators.Hidden())
+                "api_key", "", self.strings["cfg_api_key_doc"],
+                validator=loader.validators.Hidden()
             ),
             loader.ConfigValue("model_name", "gemini-1.5-flash", self.strings["cfg_model_name_doc"]),
             loader.ConfigValue("interactive_buttons", True, self.strings["cfg_buttons_doc"], validator=loader.validators.Boolean()),
@@ -148,8 +148,10 @@ class Gemini(loader.Module):
         self.client=client
         self.db=db
         self.me=await client.get_me()
-        await self._migrate_old_api_key()
-        self.api_keys = self.config["api_keys"]
+
+        await self._migrate_keys()
+
+        self.api_keys = [k.strip() for k in self.config["api_key"].split(",") if k.strip()]
         self.current_api_key_index = 0
         self.conversations=self._load_history_from_db(DB_HISTORY_KEY)
         self.gauto_conversations=self._load_history_from_db(DB_GAUTO_HISTORY_KEY)
@@ -159,22 +161,25 @@ class Gemini(loader.Module):
         if not self.api_keys:
              logger.warning("Gemini: API ключ(и) не настроен(ы)!")
 
-    async def _migrate_old_api_key(self): # ключи не переходили сами обратно как надо
-        """Автоматически переносит старый одиночный api_key в новый список api_keys"""
-        if self.config["api_keys"]:
-            return
-        old_config = self.db.get(self.strings["name"], "config", {})
-        old_key = old_config.get("api_key")
-        if old_key and isinstance(old_key, str):
-            keys = [k.strip() for k in old_key.split(",") if k.strip()]
-            if keys:
-                self.config["api_keys"] = keys
-                if "api_key" in old_config:
-                    del old_config["api_key"]
-                self.db.set(self.strings["name"], "config", old_config)
-                logger.info("Ключ API Gemini был успешно перенесен из старой конфигурации в новую.")
+    async def _migrate_keys(self):
+        """Автоматически переносит ключи из старого формата (список) в новый (строка)"""
+        module_config = self.db.get(self.strings["name"], "config", {})
+        old_keys_list = module_config.get("api_keys")
+        
+        if isinstance(old_keys_list, list) and old_keys_list:
+            new_string = ",".join(old_keys_list)
+            
+            module_config["api_key"] = new_string
+            del module_config["api_keys"]
+            
+            self.db.set(self.strings["name"], "config", module_config)
+            self.config["api_key"] = new_string
+            
+            logger.info("Конфигурация API ключей Gemini успешно перенесена в новый безопасный формат.")
+            
+    # ... (Остальной код модуля остается без изменений) ...
 
-    async def _prepare_parts(self, message: Message, custom_text: str=None): # обработка медиа и текста для запроса, даа
+    async def _prepare_parts(self, message: Message, custom_text: str=None): # обработка медиа и текста для запроса
         final_parts, warnings=[], []
         prompt_text_chunks=[]
         user_args=custom_text if custom_text is not None else utils.get_args_raw(message)
@@ -216,7 +221,7 @@ class Gemini(loader.Module):
                         file_content=byte_io.read().decode('utf-8')
                         prompt_text_chunks.insert(0, f"[Содержимое файла '{filename}']: \n```\n{file_content}\n```")
                     except Exception as e: warnings.append(f"⚠️ Ошибка чтения файла '{filename}': {e}")
-                elif mime_type.startswith(("video/", "audio/")): #  оработка видео через ffmpeg
+                elif mime_type.startswith(("video/", "audio/")): # обработка видео через ffmpeg
                     input_path, output_path = None, None
                     try:
                         with tempfile.NamedTemporaryFile(suffix=f".{filename.split('.')[-1]}", delete=False) as temp_in: input_path=temp_in.name
@@ -322,6 +327,9 @@ class Gemini(loader.Module):
                 except google_exceptions.GoogleAPIError as e:
                     msg = str(e)
                     if "quota" in msg.lower() or "exceeded" in msg.lower():
+                        if max_retries == 1:
+                            error_to_report = e
+                            break
                         logger.warning(f"Ключ Gemini API №{current_key_index + 1} исчерпал квоту. Пробую следующий.")
                         if i == max_retries - 1:
                             error_to_report = RuntimeError("Все ключи исчерпали квоту.")
@@ -804,7 +812,7 @@ class Gemini(loader.Module):
         logger.exception("Gemini execution error")
         if isinstance(e, asyncio.TimeoutError):
             return self.strings["api_timeout"]
-        if isinstance(e, RuntimeError) and "All keys exhausted" in str(e):
+        if isinstance(e, RuntimeError) and "Все ключи исчерпали квоту" in str(e):
              return self.strings["all_keys_exhausted"].format(len(self.api_keys))
         if isinstance(e, google_exceptions.GoogleAPIError):
             msg = str(e)
@@ -921,10 +929,3 @@ class Gemini(loader.Module):
     def _is_memory_enabled(self, chat_id: str) -> bool: return chat_id not in self.memory_disabled_chats
     def _disable_memory(self, chat_id: int): self.memory_disabled_chats.add(str(chat_id))
     def _enable_memory(self, chat_id: int): self.memory_disabled_chats.discard(str(chat_id))
-
-# A
-# :^
-# не ну тут беспредел какой то
-# ну более менее написал
-# и на последнее
-# кто прочитал тот гей)
