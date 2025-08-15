@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 2, 1) # pew pew pew
+__version__ = (5, 2, 2) # pew pew pew
 
 # meta developer: @SenkoGuardianModules
 
@@ -51,7 +51,7 @@ class Gemini(loader.Module):
     """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
     strings = {
         "name": "Gemini",
-        "cfg_api_key_doc": "API ключи Google Gemini, просто пишете через запятую то есть [ключ1], [ключ2]",
+        "cfg_api_key_doc": "API ключи Google Gemini, разделенные запятой. Будут скрыты.",
         "cfg_model_name_doc": "Модель Gemini.",
         "cfg_buttons_doc": "Включить интерактивные кнопки.",
         "cfg_system_instruction_doc": "Системная инструкция (промпт) для Gemini.",
@@ -62,6 +62,7 @@ class Gemini(loader.Module):
         "cfg_impersonation_history_limit_doc": "Сколько последних сообщений из чата отправлять в качестве контекста для авто-ответа.",
         "cfg_impersonation_reply_chance_doc": "Вероятность ответа в режиме gauto (от 0.0 до 1.0). 0.2 = 20% шанс.",
         "no_api_key": '❗️ <b>Api ключ(и) не настроен(ы).</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.\n<b>Добавьте ключ(и) в конфиге модуля:</b> <code>.cfg gemini api_key</code>',
+        "invalid_api_key": '❗️ <b>Предоставленный API ключ недействителен.</b>\nУбедитесь, что он правильно скопирован из <a href="https://aistudio.google.com/app/apikey">Google AI Studio</a> и что для него включен Gemini API.',
         "all_keys_exhausted": "❗️ <b>Все доступные API ключи ({}) исчерпали свою квоту.</b>\nПопробуйте позже или добавьте новые ключи в конфиге: <code>.cfg gemini api_key</code>",
         "no_prompt_or_media": "⚠️ <i>Нужен текст или ответ на медиа/файл.</i>",
         "processing": "<emoji document_id=5386367538735104399>⌛️</emoji> <b>Обработка...</b>",
@@ -109,7 +110,6 @@ class Gemini(loader.Module):
         "application/json", "application/xml", "application/x-python", "text/x-python",
         "application/javascript", "application/x-sh",
     }
-
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue(
@@ -148,9 +148,6 @@ class Gemini(loader.Module):
         self.client=client
         self.db=db
         self.me=await client.get_me()
-
-        await self._migrate_keys()
-
         self.api_keys = [k.strip() for k in self.config["api_key"].split(",") if k.strip()]
         self.current_api_key_index = 0
         self.conversations=self._load_history_from_db(DB_HISTORY_KEY)
@@ -160,26 +157,8 @@ class Gemini(loader.Module):
         self._configure_proxy()
         if not self.api_keys:
              logger.warning("Gemini: API ключ(и) не настроен(ы)!")
-
-    async def _migrate_keys(self):
-        """Автоматически переносит ключи из старого формата (список) в новый (строка)"""
-        module_config = self.db.get(self.strings["name"], "config", {})
-        old_keys_list = module_config.get("api_keys")
-        
-        if isinstance(old_keys_list, list) and old_keys_list:
-            new_string = ",".join(old_keys_list)
             
-            module_config["api_key"] = new_string
-            del module_config["api_keys"]
-            
-            self.db.set(self.strings["name"], "config", module_config)
-            self.config["api_key"] = new_string
-            
-            logger.info("Конфигурация API ключей Gemini успешно перенесена в новый безопасный формат.")
-            
-    # ... (Остальной код модуля остается без изменений) ...
-
-    async def _prepare_parts(self, message: Message, custom_text: str=None): # обработка медиа и текста для запроса
+    async def _prepare_parts(self, message: Message, custom_text: str=None):
         final_parts, warnings=[], []
         prompt_text_chunks=[]
         user_args=custom_text if custom_text is not None else utils.get_args_raw(message)
@@ -221,7 +200,29 @@ class Gemini(loader.Module):
                         file_content=byte_io.read().decode('utf-8')
                         prompt_text_chunks.insert(0, f"[Содержимое файла '{filename}']: \n```\n{file_content}\n```")
                     except Exception as e: warnings.append(f"⚠️ Ошибка чтения файла '{filename}': {e}")
-                elif mime_type.startswith(("video/", "audio/")): # обработка видео через ffmpeg
+                elif mime_type.startswith("audio/"):
+                    input_path, output_path = None, None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=f".{filename.split('.')[-1]}", delete=False) as temp_in: input_path = temp_in.name
+                        await self.client.download_media(media, input_path)
+                        if os.path.getsize(input_path) > MAX_FFMPEG_SIZE:
+                            warnings.append(f"⚠️ Аудиофайл '{filename}' слишком большой для конвертации (> {MAX_FFMPEG_SIZE // 1024 // 1024} МБ)."); raise StopIteration
+                        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_out: output_path = temp_out.name
+                        ffmpeg_cmd = ["ffmpeg", "-y", "-i", input_path, "-c:a", "libmp3lame", "-q:a", "2", output_path]
+                        process_ffmpeg = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        _, stderr = await process_ffmpeg.communicate()
+                        if process_ffmpeg.returncode != 0:
+                            stderr_str = stderr.decode()
+                            warnings.append(f"⚠️ <b>Ошибка FFmpeg (аудио):</b>\nНе удалось конвертировать '{filename}'. Детали:\n<code>{utils.escape_html(stderr_str)}</code>")
+                            raise StopIteration
+                        with open(output_path, "rb") as f:
+                            final_parts.append(glm.Part(inline_data=glm.Blob(mime_type="audio/mpeg", data=f.read())))
+                    except StopIteration: pass
+                    except Exception as e: warnings.append(f"⚠️ Критическая ошибка при обработке аудио '{filename}': {e}")
+                    finally:
+                        if input_path and os.path.exists(input_path): os.remove(input_path)
+                        if output_path and os.path.exists(output_path): os.remove(output_path)
+                elif mime_type.startswith("video/"):
                     input_path, output_path = None, None
                     try:
                         with tempfile.NamedTemporaryFile(suffix=f".{filename.split('.')[-1]}", delete=False) as temp_in: input_path=temp_in.name
@@ -238,6 +239,8 @@ class Gemini(loader.Module):
                         if not has_audio:
                             ffmpeg_cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
                             maps.extend(["-map", "1:a:0"])
+                        else:
+                            maps.extend(["-map", "0:a:0?"])
                         ffmpeg_cmd.extend([*maps, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", output_path])
                         process_ffmpeg = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                         _, stderr = await process_ffmpeg.communicate()
@@ -259,7 +262,7 @@ class Gemini(loader.Module):
             final_parts.insert(0, glm.Part(text=full_prompt_text))
         return final_parts, warnings
 
-    async def _send_to_gemini(self, message, parts: list, regeneration: bool=False, call: InlineCall=None, status_msg=None, chat_id_override: int=None, impersonation_mode: bool=False, use_url_context: bool=False, display_prompt: str=None):# основная логика отправки запроса к API
+    async def _send_to_gemini(self, message, parts: list, regeneration: bool=False, call: InlineCall=None, status_msg=None, chat_id_override: int=None, impersonation_mode: bool=False, use_url_context: bool=False, display_prompt: str=None):
         msg_obj=None
         if regeneration:
             chat_id=chat_id_override; base_message_id=message
@@ -451,12 +454,33 @@ class Gemini(loader.Module):
             f"ИСТОРИЯ ЧАТА:\n---\n{chat_log}\n---"
         )
         try:
-            if not self.api_keys:
+            response = None
+            error_to_report = None
+            max_retries = len(self.api_keys)
+            if not max_retries:
                 await utils.answer(status_msg, self.strings['no_api_key']); return
-            genai.configure(api_key=self.api_keys[self.current_api_key_index % len(self.api_keys)])
-            sanitized_model_name = self.config["model_name"].lower().replace(" ", "-")
-            model = genai.GenerativeModel(sanitized_model_name, safety_settings=self.safety_settings)
-            response = await asyncio.wait_for(model.generate_content_async(full_prompt), timeout=GEMINI_TIMEOUT)
+            for i in range(max_retries):
+                current_key_index = (self.current_api_key_index + i) % max_retries
+                api_key = self.api_keys[current_key_index]
+                try:
+                    genai.configure(api_key=api_key)
+                    sanitized_model_name = self.config["model_name"].lower().replace(" ", "-")
+                    model = genai.GenerativeModel(sanitized_model_name, safety_settings=self.safety_settings)
+                    api_response = await asyncio.wait_for(model.generate_content_async(full_prompt), timeout=GEMINI_TIMEOUT)
+                    response = api_response
+                    self.current_api_key_index = current_key_index
+                    break
+                except google_exceptions.GoogleAPIError as e:
+                    msg = str(e)
+                    if "quota" in msg.lower() or "exceeded" in msg.lower():
+                        if max_retries == 1: error_to_report = e; break
+                        logger.warning(f"Ключ Gemini API №{current_key_index + 1} исчерпал квоту. Пробую следующий.")
+                        if i == max_retries - 1: error_to_report = RuntimeError("Все ключи исчерпали квоту.")
+                        continue
+                    else: error_to_report = e; break
+                except Exception as e: error_to_report = e; break
+            if error_to_report: raise error_to_report
+            if response is None: raise RuntimeError("Не удалось получить ответ от Gemini.")
             result_text = re.sub(r"</?emoji[^>]*>", "", response.text)
             header = self.strings["gch_result_caption_from_chat"].format(count, chat_name) if target_chat_id != utils.get_chat_id(message) else self.strings["gch_result_caption"].format(count)
             question_html = f"<blockquote expandable>{utils.escape_html(user_prompt)}</blockquote>"
@@ -714,7 +738,7 @@ class Gemini(loader.Module):
             os.environ["http_proxy"]=self.config["proxy"]
             os.environ["https_proxy"]=self.config["proxy"]
 
-    @loader.watcher(only_incoming=True, ignore_edited=True) # слежение за чатами для авто-ответа (gauto)
+    @loader.watcher(only_incoming=True, ignore_edited=True)
     async def watcher(self, message: Message):
         if not isinstance(message, types.Message) or not hasattr(message, 'chat_id'): return
         chat_id=utils.get_chat_id(message)
@@ -731,7 +755,7 @@ class Gemini(loader.Module):
             await asyncio.sleep(random.uniform(1.0, 2.5))
             await message.reply(response_text.strip())
 
-    def _load_history_from_db(self, db_key: str) -> dict: # управление памятью
+    def _load_history_from_db(self, db_key: str) -> dict:
         raw_conversations=self.db.get(self.strings["name"], db_key, {})
         if not isinstance(raw_conversations, dict):
             logger.warning(f"Gemini: БД для ключа '{db_key}' повреждена, сбрасываю.")
@@ -752,7 +776,7 @@ class Gemini(loader.Module):
         if chats_with_bad_history: logger.warning(f"Gemini ({db_key}): Некорректная структура памяти в {len(chats_with_bad_history)} чатах. Некорректные записи пропущены.")
         return raw_conversations
 
-    def _save_history_sync(self, gauto: bool=False): # управление памятью х2
+    def _save_history_sync(self, gauto: bool=False):
         if getattr(self, "_db_broken", False): return
         conversations_to_save, db_key=(self.gauto_conversations, DB_GAUTO_HISTORY_KEY) if gauto else (self.conversations, DB_HISTORY_KEY)
         try: self.db.set(self.strings["name"], db_key, conversations_to_save)
@@ -760,7 +784,7 @@ class Gemini(loader.Module):
             logger.error(f"Ошибка сохранения истории Gemini (gauto={gauto}): {e}")
             self._db_broken=True
 
-    def _get_structured_history(self, chat_id: int, gauto: bool=False) -> list: # управление памятью х3
+    def _get_structured_history(self, chat_id: int, gauto: bool=False) -> list:
         conversations=self.gauto_conversations if gauto else self.conversations
         hist=conversations.get(str(chat_id), [])
         if not isinstance(hist, list):
@@ -770,7 +794,7 @@ class Gemini(loader.Module):
             self._save_history_sync(gauto)
         return hist
 
-    def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False, message: Message = None, gauto: bool = False): # управление памятью х4
+    def _update_history(self, chat_id: int, user_parts: list, model_response: str, regeneration: bool = False, message: Message = None, gauto: bool = False):
         if not self._is_memory_enabled(str(chat_id)):
             return
         history = self._get_structured_history(chat_id, gauto)
@@ -802,7 +826,7 @@ class Gemini(loader.Module):
         conversations[str(chat_id)] = history
         self._save_history_sync(gauto)
 
-    def _clear_history(self, chat_id: int, gauto: bool=False): # управление памятью х5
+    def _clear_history(self, chat_id: int, gauto: bool=False):
         conversations=self.gauto_conversations if gauto else self.conversations
         if str(chat_id) in conversations:
             del conversations[str(chat_id)]
@@ -845,7 +869,7 @@ class Gemini(loader.Module):
                     'А для тех у кого UserLand инструкция <a href="https://t.me/SenkoGuardianModules/35">тут</a>'
                 )
             if "API key not valid" in msg:
-                return self.strings["no_api_key"]
+                return self.strings["invalid_api_key"]
             if "blocked" in msg.lower():
                 return self.strings["blocked_error"].format(utils.escape_html(msg))
             return self.strings["api_error"].format(utils.escape_html(msg))
@@ -902,7 +926,7 @@ class Gemini(loader.Module):
         fetch_limit = history_limit + 1 if skip_last else history_limit
         chat_history_lines = []
         try:
-            messages = await self.client.get_messages(chat_id, limit=fetch_limit) # получение истории (включая топики)
+            messages = await self.client.get_messages(chat_id, limit=fetch_limit)
             if skip_last and messages:
                 messages = messages[1:]
             for msg in messages:
