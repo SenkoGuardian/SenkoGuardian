@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 2, 2) # pew pew pew
+__version__ = (5, 2, 3) # pew pew pew
 
 # meta developer: @SenkoGuardianModules
 
@@ -395,6 +395,7 @@ class Gemini(loader.Module):
             text_to_check+=" " + reply.text
         if re.search(r'https?://\S+', text_to_check): use_url_context=True
         status_msg=await utils.answer(message, self.strings["processing"])
+        status_msg = await self.client.get_messages(status_msg.chat_id, ids=status_msg.id)
         parts, warnings=await self._prepare_parts(message, custom_text=clean_args)
         if warnings and status_msg:
             warning_text="\n".join(warnings)
@@ -439,6 +440,7 @@ class Gemini(loader.Module):
         except (ValueError, TypeError):
             return await utils.answer(message, self.strings["gch_invalid_args"].format(f"Количество сообщений должно быть числом от 1 до 20000. Вы ввели: <code>{utils.escape_html(count_str)}</code>"))
         status_msg = await utils.answer(message, self.strings["gch_processing"].format(count))
+        status_msg = await self.client.get_messages(status_msg.chat_id, ids=status_msg.id)
         try:
             entity = await self.client.get_entity(target_chat_id)
             chat_name = utils.escape_html(get_display_name(entity))
@@ -740,17 +742,27 @@ class Gemini(loader.Module):
 
     @loader.watcher(only_incoming=True, ignore_edited=True)
     async def watcher(self, message: Message):
-        if not isinstance(message, types.Message) or not hasattr(message, 'chat_id'): return
-        chat_id=utils.get_chat_id(message)
-        if chat_id not in self.impersonation_chats: return
-        if message.out or (message.from_id and message.from_id.user_id==self.me.id) or (message.text and message.text.startswith(self.get_prefix())): return
-        sender=await message.get_sender()
-        if not sender or sender.bot: return
-        if random.random() > self.config["impersonation_reply_chance"]: return
-        parts, warnings=await self._prepare_parts(message)
-        if warnings: logger.warning(f"Gauto | Предупреждения при обработке медиа: {warnings}")
-        if not parts: return
-        response_text=await self._send_to_gemini(message=message, parts=parts, impersonation_mode=True)
+        if not isinstance(message, types.Message) or not hasattr(message, 'chat_id'):
+            return
+        chat_id = utils.get_chat_id(message)
+        if chat_id not in self.impersonation_chats:
+            return
+        is_from_self_user = isinstance(message.from_id, types.PeerUser) and message.from_id.user_id == self.me.id
+        is_command = message.text and message.text.startswith(self.get_prefix())
+        if message.out or is_from_self_user or is_command:
+            return
+        sender = await message.get_sender()
+        is_sender_a_bot = isinstance(sender, types.User) and sender.bot
+        if not sender or is_sender_a_bot:
+            return
+        if random.random() > self.config["impersonation_reply_chance"]:
+            return
+        parts, warnings = await self._prepare_parts(message)
+        if warnings:
+            logger.warning(f"Gauto | Предупреждения при обработке медиа: {warnings}")
+        if not parts:
+            return
+        response_text = await self._send_to_gemini(message=message, parts=parts, impersonation_mode=True)
         if response_text and response_text.strip():
             await asyncio.sleep(random.uniform(1.0, 2.5))
             await message.reply(response_text.strip())
