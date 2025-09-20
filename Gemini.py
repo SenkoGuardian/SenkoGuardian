@@ -197,6 +197,7 @@ class Gemini(loader.Module):
                     try:
                         byte_io=io.BytesIO()
                         await self.client.download_media(media, byte_io)
+                        byte_io.seek(0)
                         file_content=byte_io.read().decode('utf-8')
                         prompt_text_chunks.insert(0, f"[Содержимое файла '{filename}']: \n```\n{file_content}\n```")
                     except Exception as e: warnings.append(f"⚠️ Ошибка чтения файла '{filename}': {e}")
