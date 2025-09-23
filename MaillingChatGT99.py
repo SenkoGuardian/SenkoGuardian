@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (1, 1, 0) # Восстановлен оригинальный цикл рассылки + новые улучшения
+__version__ = (1, 2, 0) # Восстановлен оригинальный цикл рассылки + новые улучшения
 
 # meta developer: @SenkoGuardianModules
 
@@ -11,6 +11,7 @@ import asyncio
 import logging
 import random
 import re
+import io
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -261,22 +262,27 @@ class MailChats(loader.Module):
     async def mail_help(self, message):
         """📋 Показать пошаговую инструкцию по настройке рассылки."""
         help_text = """
+<blockquote expandable>
 <b>📋 Инструкция по настройке рассылки:</b>
 
 <b>Шаг 1: Добавьте чаты для рассылки</b>
-• Перейдите в нужный чат и напишите <code>.add_chat</code>.
-• Или укажите юзернейм/ссылку: <code>.add_chat @username https://t.me/channel/123</code>
+• <b>Вручную:</b> Перейдите в нужный чат и напишите <code>.add_chat</code>.
+• <b>По ссылке/ID:</b> <code>.add_chat @username https://t.me/channel/123</code>
+
+<b>✨ Автоматический сбор чатов (если их много):</b>
+• <code>.dump_chats</code> — выгружает ID всех ваших групп и каналов в файл.
+• <code>.load_chats</code> — ответьте этой командой на полученный файл, чтобы добавить все чаты из него в список рассылки.
 
 <b>Шаг 2: Добавьте сообщения</b>
 • Ответьте на любое сообщение (текст, фото, видео) командой <code>.add_msg</code>.
 • Можно добавить несколько сообщений для рассылки.
 
 <b>Шаг 3: Проверьте списки</b>
-• <code>.list_chats</code> — посмотреть список чатов.
+• <code>.list_chats</code> — посмотреть список чатов. Если их больше 50, отправит файлом.
 • <code>.list_msgs</code> — посмотреть список сообщений.
 
 <b>Шаг 4: Тонкая настройка (по желанию)</b>
-Откройте конфиг командой <code>.cfg MaillingChatGT99</code>. Вот что значат основные параметры:
+Откройте конфиг командой <code>.cfg MailChats</code>. Вот что значат основные параметры:
 
 <b>-- Режимы работы --</b>
 • <code>safe_mode</code>: <b>Безопасный режим.</b> Если включить, рассылка будет идти медленнее и только в группы/каналы, чтобы снизить риск спам-блока.
@@ -304,8 +310,9 @@ class MailChats(loader.Module):
 • <code>.remove_chat &lt;номер&gt;</code> — удалить чат из списка.
 • <code>.remove_msg &lt;номер&gt;</code> — удалить сообщение.
 • <code>.clear_chats</code> / <code>.clear_msgs</code> - полная очистка списков.
+</blockquote>
 """
-        await self._edit_or_reply_and_handle_deletion(message, help_text, delay=60)
+        await self._edit_or_reply_and_handle_deletion(message, help_text, delay=240)
 
     @loader.command()
     async def add_chat(self, message):
@@ -373,13 +380,27 @@ class MailChats(loader.Module):
     @loader.command()
     async def list_chats(self, message):
         """📜 Показать список чатов."""
-        if not self.chats:
-            await self._edit_or_reply_and_handle_deletion(message, self.strings["no_chats"]); return
-        output = "<b>Список чатов для рассылки:</b>\n\n"
-        sorted_items = sorted(self.chats.items(), key=lambda item: (item[1], item[0][0], item[0][1] or -1))
+        async with self.lock:
+            current_chats_copy = dict(self.chats)
+        if not current_chats_copy:
+            await self._edit_or_reply_and_handle_deletion(message, self.strings["no_chats"])
+            return
+        output_header = "Список чатов для рассылки:\n\n"
+        sorted_items = sorted(current_chats_copy.items(), key=lambda item: (item[1], item[0][0], item[0][1] or -1))
+        if len(sorted_items) > 50:
+            file_content = output_header
+            for i, ((cid, tid), name) in enumerate(sorted_items):
+                topic_str = f' | Тема: {tid}' if tid is not None else ''
+                file_content += f"{i+1}. {name} ({cid}{topic_str})\n"
+            file = io.BytesIO(file_content.encode("utf-8"))
+            file.name = "Mailing_Chat_List.txt"
+            await self._edit_or_reply_and_handle_deletion(message, "📝 <b>Список чатов слишком большой, отправляю файлом...</b>", delay=0)
+            await self.client.send_file(message.chat_id, file, caption=f"✅ <b>Список из {len(sorted_items)} чатов.</b>")
+            return
+        output = "<b>" + output_header.strip() + "</b>\n\n"
         for i, ((cid, tid), name) in enumerate(sorted_items):
             topic_str = f' | Тема: <code>{tid}</code>' if tid is not None else ''
-            output += f"<b>{i+1}.</b> {name} (<code>{cid}</code>{topic_str})\n"
+            output += f"<b>{i+1}.</b> {utils.escape_html(name)} (<code>{cid}</code>{topic_str})\n"
         await self._edit_or_reply_and_handle_deletion(message, output, delay=60)
 
     @loader.command()
@@ -599,3 +620,62 @@ class MailChats(loader.Module):
             async with self.lock:
                 self.is_running = False
                 self.mail_task = None
+
+    @loader.command()
+    async def dump_chats(self, message):
+        """📥 Выгрузить ID всех ваших групп и каналов в .txt файл."""
+        status_msg = await self._edit_or_reply_and_handle_deletion(message, "⏳ <b>Начинаю выгрузку чатов... Это может занять некоторое время.</b>", delay=0)
+        chat_ids = []
+        try:
+            async for dialog in self.client.iter_dialogs():
+                if dialog.is_group or dialog.is_channel:
+                    chat_ids.append(str(dialog.id))
+        except Exception as e:
+            await self._edit_or_reply_and_handle_deletion(status_msg, f"❌ <b>Произошла ошибка при выгрузке:</b>\n<code>{e}</code>")
+            return
+        if not chat_ids:
+            await self._edit_or_reply_and_handle_deletion(status_msg, "⚠️ Не найдено чатов для выгрузки.")
+            return
+        file_content = "\n".join(chat_ids)
+        file = io.BytesIO(file_content.encode("utf-8"))
+        file.name = "all_my_chats.txt"
+        await self.client.send_file(message.chat_id, file, caption=f"✅ <b>Выгружено {len(chat_ids)} чатов.</b>\n\nИспользуйте команду <code>.load_chats</code> в ответе на этот файл, чтобы добавить их в рассылку.")
+        await self._edit_or_reply_and_handle_deletion(status_msg, "✅ <b>Выгрузка завершена!</b>")
+
+    @loader.command()
+    async def load_chats(self, message):
+        """📤 Загрузить чаты в рассылку из .txt файла (ответом на файл)."""
+        reply = await message.get_reply_message()
+        if not reply or not reply.document:
+            await self._edit_or_reply_and_handle_deletion(message, "✍️ <b>Ответьте на .txt файл с ID чатов.</b>")
+            return
+        if reply.document.mime_type != 'text/plain':
+            await self._edit_or_reply_and_handle_deletion(message, "⚠️ <b>Файл должен быть в формате .txt</b>")
+            return
+        status_msg = await self._edit_or_reply_and_handle_deletion(message, "⏳ <b>Начинаю загрузку чатов из файла...</b>", delay=0)
+        content = await reply.download_media(bytes)
+        chat_identifiers = content.decode("utf-8").splitlines()
+        chat_identifiers = [line.strip() for line in chat_identifiers if line.strip()]
+        if not chat_identifiers:
+            await self._edit_or_reply_and_handle_deletion(status_msg, "⚠️ <b>Файл пуст или не содержит идентификаторов чатов.</b>")
+            return
+        added, exists, errors_list = [], [], []
+        for i, identifier in enumerate(chat_identifiers):
+            if i > 0 and i % 20 == 0:
+                await self._edit_or_reply_and_handle_deletion(status_msg, f"⏳ <b>Обработано {i}/{len(chat_identifiers)}...</b>", delay=0)
+            res = await self._find_chat(ChatTarget(identifier))
+            if res:
+                if res["key"] not in self.chats:
+                    self.chats[res["key"]] = res["name"]
+                    added.append(res["name"])
+                else:
+                    exists.append(res["name"])
+            else:
+                errors_list.append(identifier)
+        if added:
+            self._save_db_chats()
+        summary = f"✅ <b>Загрузка завершена!</b>\n\n"
+        if added: summary += f"<b>Добавлено новых чатов:</b> {len(added)}\n"
+        if exists: summary += f"<b>Уже были в списке:</b> {len(exists)}\n"
+        if errors_list: summary += f"<b>Не удалось найти:</b> {len(errors_list)}\n"
+        await self._edit_or_reply_and_handle_deletion(status_msg, summary)
