@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (1, 2, 0) # Восстановлен оригинальный цикл рассылки + новые улучшения
+__version__ = (1, 3, 0)
 
 # meta developer: @SenkoGuardianModules
 
@@ -356,11 +356,21 @@ class MailChats(loader.Module):
                     errors_list.append(f"• {utils.escape_html(targets_to_find[i].raw)}")
             if added:
                 self._save_db_chats()
-        summary = ""
-        if added: summary += self.strings["add_chat_success_header"] + "\n".join(added) + "\n\n"
-        if exists: summary += self.strings["add_chat_already_exists_header"] + "\n".join(exists) + "\n\n"
-        if errors_list: summary += self.strings["add_chat_errors_header"] + "\n".join(errors_list)
-        final_summary = self.strings["add_chat_summary_title"] + summary.strip()
+        if len(targets_to_find) > 50:
+            summary = self.strings["add_chat_summary_title"]
+            if added: summary += f"<b>✅ Добавлено:</b> {len(added)}\n"
+            if exists: summary += f"<b>⚠️ Уже существуют:</b> {len(exists)}\n"
+            if errors_list: summary += f"<b>❌ Ошибки:</b> {len(errors_list)}\n"
+            final_summary = summary.strip()
+        else:
+            summary = ""
+            if added: summary += self.strings["add_chat_success_header"] + "\n".join(added) + "\n\n"
+            if exists: summary += self.strings["add_chat_already_exists_header"] + "\n".join(exists) + "\n\n"
+            if errors_list: summary += self.strings["add_chat_errors_header"] + "\n".join(errors_list)
+            if not summary.strip():
+                 final_summary = self.strings["no_valid_chats_provided"]
+            else:
+                 final_summary = self.strings["add_chat_summary_title"] + summary.strip()
         await self._edit_or_reply_and_handle_deletion(status_msg, final_summary)
 
     @loader.command()
