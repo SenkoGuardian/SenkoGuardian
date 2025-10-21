@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 2, 3) # pew pew pew
+__version__ = (5, 2, 5) # ичего особенного
 
 # meta developer: @SenkoGuardianModules
 
@@ -104,6 +104,12 @@ class Gemini(loader.Module):
         "gch_result_caption_from_chat": "Анализ последних {} сообщений из чата <b>{}</b>",
         "gch_invalid_args": "❗️ <b>Неверные аргументы.</b>\n{}",
         "gch_chat_error": "❗️ <b>Ошибка доступа к чату</b> <code>{}</code>: <i>{}</i>",
+        "gmodel_usage": "ℹ️ <b>Использование:</b> <code>.gmodel [модель] [-s]</code>\n• [модель] — установить модель.\n• -s — показать список доступных моделей.",
+        "gmodel_list_title": "📋 <b>Доступные модели Gemini (по вашему API):</b>",
+        "gmodel_list_item": "• <code>{}</code> — {} (поддержка: {})",
+        "gmodel_img_support": "Поддержка изображений",
+        "gmodel_no_support": "Нет поддержки изображений",
+        "gmodel_img_warn": "⚠️ <b>Текущая модель ({}) не может генерировать изображения(или не доступна по API).</b>\nРекомендуем: <code>gemini-2.5-flash-image</code>",
     }
     TEXT_MIME_TYPES = {
         "text/plain", "text/markdown", "text/html", "text/css", "text/csv",
@@ -707,14 +713,43 @@ class Gemini(loader.Module):
 
     @loader.command()
     async def gmodel(self, message: Message):
-        """[model или пусто] — Узнать/сменить модель"""
-        args = utils.get_args_raw(message)
+        """[model или пусто] — Узнать/сменить модель. -s — список доступных моделей в файле."""
+        args = utils.get_args_raw(message).strip().lower()
+        if '-s' in args:
+            if not self.api_keys:
+                await utils.answer(message, self.strings['no_api_key'])
+                return
+            status_msg = await utils.answer(message, self.strings["processing"])
+            try:
+                api_key = self.api_keys[self.current_api_key_index]
+                genai.configure(api_key=api_key)
+                models_list = []
+                for model_obj in genai.list_models():
+                    model_name = model_obj.name
+                    display_name = model_obj.display_name or "Неизвестно"
+                    methods = ", ".join(model_obj.supported_generation_methods) if model_obj.supported_generation_methods else "Нет"
+                    img_support = self.strings["gmodel_img_support"] if 'predict' in model_obj.supported_generation_methods or 'generateContent' in model_obj.supported_generation_methods else self.strings["gmodel_no_support"]
+                    models_list.append(f"• {model_name} — {display_name} ({img_support})")
+                if not models_list:
+                    await utils.answer(status_msg, self.strings["gmodel_no_models"])
+                    return
+                text = self.strings["gmodel_list_title"] + "\n" + "\n".join(models_list)
+                file = io.BytesIO(text.encode("utf-8"))
+                file.name = "models_list.txt"
+                await self.client.send_file(
+                    message.chat_id,
+                    file=file,
+                    caption="📋 Список доступных моделей Gemini",
+                    reply_to=message.id
+                )
+            except Exception as e:
+                await utils.answer(status_msg, self.strings["gmodel_list_error"].format(self._handle_error(e)))
+            return
         if not args:
             await utils.answer(message, f"Текущая модель: <code>{self.config['model_name']}</code>")
             return
-        args_str = str(args).strip()
-        self.config["model_name"] = args_str
-        await utils.answer(message, f"Модель Gemini установлена: <code>{args_str}</code>")
+        self.config["model_name"] = args
+        await utils.answer(message, f"Модель Gemini установлена: <code>{args}</code>")
 
     @loader.command()
     async def gres(self, message: Message):
