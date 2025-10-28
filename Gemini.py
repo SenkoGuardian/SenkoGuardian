@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 2, 6) # Meow~~
+__version__ = (5, 2, 6) # Meow~
 
 # meta developer: @SenkoGuardianModules
 
