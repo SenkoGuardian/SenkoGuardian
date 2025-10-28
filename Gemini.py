@@ -23,6 +23,7 @@ import aiohttp
 import tempfile
 from markdown_it import MarkdownIt
 import pytz
+import google.ai.generativelanguage as glm
 from telethon import types
 from telethon.tl.types import Message, DocumentAttributeFilename
 from telethon.utils import get_display_name, get_peer_id
@@ -34,7 +35,7 @@ from telethon.errors.rpcerrorlist import (
 )
 try:
     import google.generativeai as genai
-    import google.ai.generativelanguage as glm
+    import google.ai.generativelanguage
     import google.api_core.exceptions as google_exceptions
     GOOGLE_AVAILABLE = True
 except ImportError:
