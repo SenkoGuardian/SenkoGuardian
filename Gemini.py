@@ -3,9 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 2, 5) # ичего особенного
-
-# meta developer: @SenkoGuardianModules
+__version__ = (5, 2, 6) # Meow~~
 
 #  .------. .------. .------. .------. .------. .------.
 #  |S.--. | |E.--. | |N.--. | |M.--. | |O.--. | |D.--. |
@@ -28,11 +26,19 @@ import pytz
 from telethon import types
 from telethon.tl.types import Message, DocumentAttributeFilename
 from telethon.utils import get_display_name, get_peer_id
-from telethon.errors.rpcerrorlist import MessageTooLongError, ChatAdminRequiredError
-from telethon.errors.rpcerrorlist import UserNotParticipantError, ChannelPrivateError
-import google.ai.generativelanguage as glm
-import google.api_core.exceptions as google_exceptions
-import google.generativeai as genai
+from telethon.errors.rpcerrorlist import (
+    MessageTooLongError, 
+    ChatAdminRequiredError,
+    UserNotParticipantError, 
+    ChannelPrivateError
+)
+try:
+    import google.generativeai as genai
+    import google.ai.generativelanguage as glm
+    import google.api_core.exceptions as google_exceptions
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    GOOGLE_AVAILABLE = False
 from .. import loader, utils
 from ..inline.types import InlineCall
 
@@ -46,7 +52,6 @@ DB_IMPERSONATION_KEY = "gemini_impersonation_chats"
 GEMINI_TIMEOUT = 840
 MAX_FFMPEG_SIZE = 90 * 1024 * 1024
 
-@loader.tds
 class Gemini(loader.Module):
     """Модуль для работы с Google Gemini AI.(стабильная память и поддержка video/image/audio)"""
     strings = {
@@ -97,7 +102,11 @@ class Gemini(loader.Module):
         "auto_mode_off": "🎭 <b>Режим авто-ответа выключен в этом чате.</b>",
         "auto_mode_chats_title": "🎭 <b>Чаты с активным авто-ответом ({}):</b>",
         "no_auto_mode_chats": "ℹ️ Нет чатов с включенным режимом авто-ответа.",
-        "auto_mode_usage": "ℹ️ <b>Использование:</b> <code>.gauto on/off</code>",
+        "auto_mode_usage": "ℹ️ <b>Использование:</b> <code>.gauto on/off или[id/username] [on/off]</code>",
+        "gauto_chat_not_found": "🚫 <b>Не удалось найти чат:</b> <code>{}</code>",
+        "gauto_state_updated": "🎭 <b>Режим авто-ответа для чата {} {}</b>",
+        "gauto_enabled": "включен",
+        "gauto_disabled": "выключен",
         "gch_usage": "ℹ️ <b>Использование:</b>\n<code>.gch <кол-во> <вопрос></code>\n<code>.gch <id чата> <кол-во> <вопрос></code>",
         "gch_processing": "<emoji document_id=5386367538735104399>⌛️</emoji> <b>Анализирую {} сообщений...</b>",
         "gch_result_caption": "Анализ последних {} сообщений",
@@ -110,6 +119,8 @@ class Gemini(loader.Module):
         "gmodel_img_support": "Поддержка изображений",
         "gmodel_no_support": "Нет поддержки изображений",
         "gmodel_img_warn": "⚠️ <b>Текущая модель ({}) не может генерировать изображения(или не доступна по API).</b>\nРекомендуем: <code>gemini-2.5-flash-image</code>",
+        "gme_chat_not_found": "🚫 <b>Не удалось найти чат для экспорта:</b> <code>{}</code>",
+        "gme_sent_to_saved": "💾 История экспортирована в избранное.",
     }
     TEXT_MIME_TYPES = {
         "text/plain", "text/markdown", "text/html", "text/css", "text/csv",
@@ -122,10 +133,10 @@ class Gemini(loader.Module):
                 "api_key", "", self.strings["cfg_api_key_doc"],
                 validator=loader.validators.Hidden()
             ),
-            loader.ConfigValue("model_name", "gemini-2.5-flash", self.strings["cfg_model_name_doc"]),
+            loader.ConfigValue("model_name", "gemini-1.5-flash", self.strings["cfg_model_name_doc"]),
             loader.ConfigValue("interactive_buttons", True, self.strings["cfg_buttons_doc"], validator=loader.validators.Boolean()),
             loader.ConfigValue("system_instruction", "", self.strings["cfg_system_instruction_doc"], validator=loader.validators.String()),
-            loader.ConfigValue("max_history_length", 800, self.strings["cfg_max_history_length_doc"], validator=loader.validators.Integer(minimum=0)),
+            loader.ConfigValue("max_history_length", 10, self.strings["cfg_max_history_length_doc"], validator=loader.validators.Integer(minimum=0)),
             loader.ConfigValue("timezone", "Europe/Moscow", self.strings["cfg_timezone_doc"]),
             loader.ConfigValue("proxy", "", self.strings["cfg_proxy_doc"]),
             loader.ConfigValue(
@@ -140,30 +151,35 @@ class Gemini(loader.Module):
                 self.strings["cfg_impersonation_prompt_doc"],
                 validator=loader.validators.String(),
             ),
-            loader.ConfigValue("impersonation_history_limit", 80, self.strings["cfg_impersonation_history_limit_doc"], validator=loader.validators.Integer(minimum=5, maximum=100)),
+            loader.ConfigValue("impersonation_history_limit", 20, self.strings["cfg_impersonation_history_limit_doc"], validator=loader.validators.Integer(minimum=5, maximum=100)),
             loader.ConfigValue("impersonation_reply_chance", 0.25, self.strings["cfg_impersonation_reply_chance_doc"], validator=loader.validators.Float(minimum=0.0, maximum=1.0)),
+            loader.ConfigValue("gauto_in_pm", False, "Разрешить авто-ответы в личных сообщениях (ЛС).", validator=loader.validators.Boolean()),
         )
-        self.conversations={}
-        self.gauto_conversations={}
-        self.last_requests={}
-        self.impersonation_chats=set()
-        self._lock=asyncio.Lock()
-        self.memory_disabled_chats=set()
+        self.conversations = {}
+        self.gauto_conversations = {}
+        self.last_requests = {}
+        self.impersonation_chats = set()
+        self._lock = asyncio.Lock()
+        self.memory_disabled_chats = set()
 
     async def client_ready(self, client, db):
-        self.client=client
-        self.db=db
-        self.me=await client.get_me()
-        self.api_keys = [k.strip() for k in self.config["api_key"].split(",") if k.strip()]
+        self.client = client
+        self.db = db
+        self.me = await client.get_me()
+        if not GOOGLE_AVAILABLE:
+            logger.error("Gemini: Google API libraries are not available. Please install required dependencies.")
+            return
+        api_key_str = self.config["api_key"]
+        self.api_keys = [k.strip() for k in api_key_str.split(",") if k.strip()] if api_key_str else []
         self.current_api_key_index = 0
-        self.conversations=self._load_history_from_db(DB_HISTORY_KEY)
-        self.gauto_conversations=self._load_history_from_db(DB_GAUTO_HISTORY_KEY)
-        self.impersonation_chats=set(self.db.get(self.strings["name"], DB_IMPERSONATION_KEY, []))
-        self.safety_settings=[{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+        self.conversations = self._load_history_from_db(DB_HISTORY_KEY)
+        self.gauto_conversations = self._load_history_from_db(DB_GAUTO_HISTORY_KEY)
+        self.impersonation_chats = set(self.db.get(self.strings["name"], DB_IMPERSONATION_KEY, []))
+        self.safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
         self._configure_proxy()
         if not self.api_keys:
-             logger.warning("Gemini: API ключ(и) не настроен(ы)!")
-            
+            logger.warning("Gemini: API ключ(и) не настроен(ы)!")
+
     async def _prepare_parts(self, message: Message, custom_text: str=None):
         final_parts, warnings=[], []
         prompt_text_chunks=[]
@@ -509,17 +525,41 @@ class Gemini(loader.Module):
 
     @loader.command()
     async def gauto(self, message: Message):
-        """<on/off> — Включить/выключить режим авто-ответа в чате."""
-        args=utils.get_args_raw(message)
-        chat_id=utils.get_chat_id(message)
-        if args=="on":
-            self.impersonation_chats.add(chat_id)
+        """<on/off/[id]> — Вкл/выкл авто-ответ в чате."""
+        args = utils.get_args_raw(message).split()
+        if not args:
+            await utils.answer(message, self.strings["auto_mode_usage"])
+            return
+        chat_id = utils.get_chat_id(message)
+        state_arg = args[0].lower()
+        target_chat_id = None
+        action = None
+        if len(args) == 1:
+            if state_arg in ("on", "off"):
+                target_chat_id = chat_id
+                action = state_arg
+        elif len(args) == 2:
+            try:
+                entity = await self.client.get_entity(args[0])
+                target_chat_id = entity.id
+                action = args[1].lower()
+            except Exception:
+                await utils.answer(message, self.strings["gauto_chat_not_found"].format(utils.escape_html(args[0])))
+                return
+        if action == "on":
+            self.impersonation_chats.add(target_chat_id)
             self.db.set(self.strings["name"], DB_IMPERSONATION_KEY, list(self.impersonation_chats))
-            await utils.answer(message, self.strings["auto_mode_on"].format(int(self.config["impersonation_reply_chance"]*100)))
-        elif args=="off":
-            self.impersonation_chats.discard(chat_id)
+            if target_chat_id == chat_id:
+                await utils.answer(message, self.strings["auto_mode_on"].format(int(self.config["impersonation_reply_chance"] * 100)))
+            else:
+                await utils.answer(message, self.strings["gauto_state_updated"].format(f"<code>{target_chat_id}</code>", self.strings["gauto_enabled"]))
+        elif action == "off":
+            self.impersonation_chats.discard(target_chat_id)
             self.db.set(self.strings["name"], DB_IMPERSONATION_KEY, list(self.impersonation_chats))
-            await utils.answer(message, self.strings["auto_mode_off"])
+            if target_chat_id == chat_id:
+                await utils.answer(message, self.strings["auto_mode_off"])
+            else:
+                await utils.answer(message, self.strings["gauto_state_updated"].format(f"<code>{target_chat_id}</code>", self.strings["gauto_disabled"]))
         else:
             await utils.answer(message, self.strings["auto_mode_usage"])
 
@@ -602,40 +642,86 @@ class Gemini(loader.Module):
 
     @loader.command()
     async def gmemexport(self, message: Message):
-        """[auto] — экспортировать историю чата. auto для истории gauto."""
-        args=utils.get_args_raw(message)
-        gauto_mode=args=="auto"
-        chat_id=utils.get_chat_id(message)
-        hist=self._get_structured_history(chat_id, gauto=gauto_mode)
-        if not hist: return await utils.answer(message, "История для экспорта пуста.")
-        user_ids={e.get("user_id") for e in hist if e.get("role")=="user" and e.get("user_id")}
-        user_names={None: None}
-        for uid in user_ids:
-            if not uid: continue
+        """[<id/@юз чата>] [auto] [-s] — \n[из id/@юза чата] экспорт. -s в избранное."""
+        args = utils.get_args_raw(message).split()
+        save_to_self = "-s" in args
+        if save_to_self:
+            args.remove("-s")
+        gauto_mode = "auto" in args
+        if gauto_mode:
+            args.remove("auto")
+        source_chat_id_str = args[0] if args else None
+        target_chat_id = "me" if save_to_self else message.chat_id
+        if source_chat_id_str:
             try:
-                entity=await self.client.get_entity(uid)
-                user_names[uid]=get_display_name(entity)
-            except Exception: user_names[uid]=f"Deleted Account ({uid})"
+                entity = await self.client.get_entity(
+                    int(source_chat_id_str)
+                    if source_chat_id_str.lstrip("-").isdigit()
+                    else source_chat_id_str
+                )
+                source_chat_id = entity.id
+            except Exception:
+                await utils.answer(
+                    message,
+                    self.strings["gme_chat_not_found"].format(
+                        utils.escape_html(source_chat_id_str)
+                    ),
+                )
+                return
+        else:
+            source_chat_id = utils.get_chat_id(message)
+        hist = self._get_structured_history(source_chat_id, gauto=gauto_mode)
+        if not hist:
+            await utils.answer(message, "История для экспорта пуста.")
+            return
+        user_ids = {e.get("user_id") for e in hist if e.get("role") == "user" and e.get("user_id")}
+        user_names = {None: None}
+        for uid in user_ids:
+            if not uid:
+                continue
+            try:
+                entity = await self.client.get_entity(uid)
+                user_names[uid] = get_display_name(entity)
+            except Exception:
+                user_names[uid] = f"Deleted Account ({uid})"
         import json
         def make_serializable(entry):
-            entry=dict(entry)
-            user_id=entry.get("user_id")
-            if user_id: entry["user_name"]=user_names.get(user_id)
-            if hasattr(user_id, "user_id"): entry["user_id"]=user_id.user_id
-            elif isinstance(user_id, (int, str)): entry["user_id"]=user_id
-            elif user_id is not None: entry["user_id"]=str(user_id)
-            else: entry["user_id"]=None
+            entry = dict(entry)
+            user_id = entry.get("user_id")
+            if user_id:
+                entry["user_name"] = user_names.get(user_id)
+            if hasattr(user_id, "user_id"):
+                entry["user_id"] = user_id.user_id
+            elif isinstance(user_id, (int, str)):
+                entry["user_id"] = user_id
+            elif user_id is not None:
+                entry["user_id"] = str(user_id)
+            else:
+                entry["user_id"] = None
             if "message_id" in entry and entry["message_id"] is not None:
-                try: entry["message_id"]=int(entry["message_id"])
-                except (ValueError, TypeError): entry["message_id"]=None
+                try:
+                    entry["message_id"] = int(entry["message_id"])
+                except (ValueError, TypeError):
+                    entry["message_id"] = None
             return entry
-        serializable_hist=[make_serializable(e) for e in hist]
-        data=json.dumps(serializable_hist, ensure_ascii=False, indent=2)
-        file_suffix="gauto_history" if gauto_mode else "history"
-        file=io.BytesIO(data.encode("utf-8"))
-        file.name=f"gemini_{file_suffix}_{chat_id}.json"
-        caption="Экспорт истории gauto Gemini" if gauto_mode else "Экспорт памяти Gemini"
-        await self.client.send_file(message.chat_id, file, caption=caption, reply_to=message.id)
+        serializable_hist = [make_serializable(e) for e in hist]
+        data = json.dumps(serializable_hist, ensure_ascii=False, indent=2)
+        file_suffix = "gauto_history" if gauto_mode else "history"
+        file = io.BytesIO(data.encode("utf-8"))
+        file.name = f"gemini_{file_suffix}_{source_chat_id}.json"
+        caption = "Экспорт истории gauto Gemini" if gauto_mode else "Экспорт памяти Gemini"
+        if source_chat_id != utils.get_chat_id(message):
+            caption += f" из чата <code>{source_chat_id}</code>"
+        await self.client.send_file(
+            target_chat_id,
+            file,
+            caption=caption,
+            reply_to=message.id if target_chat_id == message.chat_id else None,
+        )
+        if save_to_self:
+            await utils.answer(message, self.strings["gme_sent_to_saved"])
+        elif source_chat_id_str:
+            await message.delete()
 
     @loader.command()
     async def gmemimport(self, message: Message):
@@ -782,6 +868,8 @@ class Gemini(loader.Module):
             return
         chat_id = utils.get_chat_id(message)
         if chat_id not in self.impersonation_chats:
+            return
+        if message.is_private and not self.config["gauto_in_pm"]:
             return
         is_from_self_user = isinstance(message.from_id, types.PeerUser) and message.from_id.user_id == self.me.id
         is_command = message.text and message.text.startswith(self.get_prefix())
