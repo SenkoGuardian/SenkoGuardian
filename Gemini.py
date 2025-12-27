@@ -60,6 +60,8 @@ DB_IMPERSONATION_KEY = "gemini_impersonation_chats"
 GEMINI_TIMEOUT = 840
 MAX_FFMPEG_SIZE = 90 * 1024 * 1024
 
+# requires: google-genai google-api-core pytz markdown_it_py
+
 class Gemini(loader.Module):
     """Модуль для работы с Google Gemini AI (New SDK). Поддержка видео/фото/аудио и контекста пользователей."""
     strings = {
