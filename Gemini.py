@@ -3,9 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 7, 0) #перепешите на меня квартиру пж
-
-#ладно
+__version__ = (5, 8, 0) #хезе
 
 # meta developer: @SenkoGuardianModules
 
@@ -21,10 +19,14 @@ import os
 import io
 import random
 import socket
+import base64
+import uuid
+import json
+from PIL import Image
 import asyncio
 import logging
 import tempfile
-import httpx
+import aiohttp
 from datetime import datetime
 from markdown_it import MarkdownIt
 import pytz
@@ -59,11 +61,13 @@ DB_GAUTO_HISTORY_KEY = "gemini_gauto_conversations_v1"
 DB_IMPERSONATION_KEY = "gemini_impersonation_chats"
 GEMINI_TIMEOUT = 840
 MAX_FFMPEG_SIZE = 90 * 1024 * 1024
+DB_KEY_MAP_KEY = "gemini_key_model_map"
+CHECK_MODEL = "gemini-2.5-pro"
 
 # requires: google-genai google-api-core pytz markdown_it_py
 
 class Gemini(loader.Module):
-    """Модуль для работы с Google Gemini AI (New SDK). Поддержка видео/фото/аудио и контекста пользователей."""
+    """Модуль для работы с Google Gemini AI. (Поддержка видео/фото/аудио"""
     strings = {
         "name": "Gemini",
         "cfg_api_key_doc": "API ключи Google Gemini, разделенные запятой. Будут скрыты.",
@@ -78,6 +82,8 @@ class Gemini(loader.Module):
         "cfg_impersonation_reply_chance_doc": "Вероятность ответа в режиме gauto (от 0.0 до 1.0). 0.2 = 20% шанс.",
         "cfg_temperature_doc": "Температура генерации (креативность). От 0.0 до 2.0. По умолчанию 1.0.",
         "cfg_google_search_doc": "Включить поиск Google (Grounding) для актуальной информации.",
+        "cfg_image_model_doc": "Модель Gemini для генерации изображений (например: gemini-2.5-flash-image).",
+        "cfg_inline_pagination_doc": "Использовать инлайн-кнопки для длинных ответов.",
         "no_api_key": '❗️ <b>Api ключ(и) не настроен(ы).</b>\nПолучить Api ключ можно <a href="https://aistudio.google.com/app/apikey">здесь</a>.\n<b>Добавьте ключ(и) в конфиге модуля:</b> <code>.cfg gemini api_key</code>',
         "invalid_api_key": '❗️ <b>Предоставленный API ключ недействителен.</b>\nУбедитесь, что он правильно скопирован из <a href="https://aistudio.google.com/app/apikey">Google AI Studio</a> и что для него включен Gemini API.',
         "all_keys_exhausted": "❗️ <b>Все доступные API ключи ({}) исчерпали свою квоту.</b>\nПопробуйте позже или добавьте новые ключи в конфиге: <code>.cfg gemini api_key</code>",
@@ -135,7 +141,7 @@ class Gemini(loader.Module):
         "gme_sent_to_saved": "💾 История экспортирована в избранное.",
         "new_sdk_missing": "⚠️ <b>Для работы модуля нужна библиотека google-genai.</b>\nВыполните: <code>pip install google-genai</code>",
         "gprompt_usage": "ℹ️ <b>Использование:</b>\n<code>.gprompt <текст></code> — установить промпт.\n<code>.gprompt -c</code> — очистить.\nИли ответьте на <b>.txt</b> файл.",
-        "gprompt_updated": "✅ <b>Системный промпт обновлен!</b>\nДлина: {} симв.",
+        "gprompt_updated": "✅ <b>Системный промпт обновлен!</b>\nДлина: {} символов.",
         "gprompt_cleared": "🗑 <b>Системный промпт очищен.</b>",
         "gprompt_current": "📝 <b>Текущий системный промпт:</b>",
         "gprompt_file_error": "❗️ <b>Ошибка чтения файла:</b> {}",
@@ -143,6 +149,7 @@ class Gemini(loader.Module):
         "gprompt_not_text": "❗️ Это не похоже на текстовый файл.(txt)",
         "gmodel_no_models": "⚠️ Не удалось получить список моделей.",
         "gmodel_list_error": "❗️ Ошибка получения списка: {}",
+        "gimg_process": "<emoji document_id=5325547803936572038>✨</emoji> <b>Генерация...</b>\n🧠 <i>Модель: {model}</i>",
     }
     TEXT_MIME_TYPES = {
         "text/plain", "text/markdown", "text/html", "text/css", "text/csv",
@@ -174,6 +181,8 @@ class Gemini(loader.Module):
                 loader.ConfigValue("gauto_in_pm", False, "Разрешить авто-ответы в личных сообщениях (ЛС).", validator=loader.validators.Boolean()),
                 loader.ConfigValue("google_search", False, self.strings["cfg_google_search_doc"], validator=loader.validators.Boolean()),
                 loader.ConfigValue("temperature", 1.0, self.strings["cfg_temperature_doc"], validator=loader.validators.Float(minimum=0.0, maximum=2.0)),
+                loader.ConfigValue("inline_pagination", False, self.strings["cfg_inline_pagination_doc"], validator=loader.validators.Boolean()),
+                loader.ConfigValue("image_model_name", "gemini-2.5-flash-image", self.strings["cfg_image_model_doc"]),
             )
             self.conversations = {}
             self.gauto_conversations = {}
@@ -181,16 +190,24 @@ class Gemini(loader.Module):
             self.impersonation_chats = set()
             self._lock = asyncio.Lock()
             self.memory_disabled_chats = set()
+            self.pager_cache = {}
+            self.key_model_map = {}
+            self.prompt_presets = []
 
     async def client_ready(self, client, db):
         self.client = client
         self.db = db
         self.me = await client.get_me()
+        api_key_str = self.config["api_key"]
+        self.api_keys = [k.strip() for k in api_key_str.split(",") if k.strip()] if api_key_str else []
+        self.key_model_map = self.db.get(self.strings["name"], DB_KEY_MAP_KEY, {})
+        keys_to_remove = [k for k in self.key_model_map if k not in self.api_keys]
+        if keys_to_remove:
+            for k in keys_to_remove: del self.key_model_map[k]
+            self.db.set(self.strings["name"], DB_KEY_MAP_KEY, self.key_model_map)
         if not GOOGLE_AVAILABLE:
             logger.error("Gemini: 'google-genai' library missing! pip install google-genai")
             return
-        api_key_str = self.config["api_key"]
-        self.api_keys = [k.strip() for k in api_key_str.split(",") if k.strip()] if api_key_str else []
         self.current_api_key_index = 0
         self.conversations = self._load_history_from_db(DB_HISTORY_KEY)
         self.gauto_conversations = self._load_history_from_db(DB_GAUTO_HISTORY_KEY)
@@ -332,16 +349,13 @@ class Gemini(loader.Module):
         raw_hist = self._get_structured_history(chat_id, gauto=impersonation_mode)
         if regeneration and raw_hist: raw_hist = raw_hist[:-2]
         for item in raw_hist:
-            contents.append(types.Content(
-                role=item['role'], 
-                parts=[types.Part(text=item['content'])]
-            ))
+            contents.append(types.Content(role=item['role'], parts=[types.Part(text=item['content'])]))
         request_parts = list(current_turn_parts)
         if not impersonation_mode:
             try: user_timezone = pytz.timezone(self.config["timezone"])
             except pytz.UnknownTimeZoneError: user_timezone = pytz.utc
             now = datetime.now(user_timezone)
-            time_note = f"[System note: Current time is {now.strftime('%Y-%m-%d %H:%M:%S %Z')}]"
+            time_note = f"[System Info: Current local time is {now.strftime('%Y-%m-%d %H:%M:%S %Z')}]"
             if request_parts and getattr(request_parts[0], 'text', None):
                 request_parts[0] = types.Part(text=f"{time_note}\n\n{request_parts[0].text}")
             else:
@@ -367,22 +381,19 @@ class Gemini(loader.Module):
                 http_opts = None
                 if proxy_config:
                     http_opts = types.HttpOptions(async_client_args={"proxies": proxy_config})
-                
                 client = genai.Client(api_key=api_key, http_options=http_opts)
                 response = await client.aio.models.generate_content(
                     model=self.config["model_name"],
                     contents=contents,
                     config=gen_config
                 )
-                
                 if response.text:
                     result_text = response.text
                     was_successful = True
                     if self.config["google_search"]: search_icon = " 🌐"
                     self.current_api_key_index = current_idx
                     break
-                else:
-                    raise ValueError("Empty response (Safety?)")
+                else: raise ValueError("Empty response")
             except Exception as e:
                 err_str = str(e).lower()
                 if "quota" in err_str or "exhausted" in err_str or "429" in err_str:
@@ -392,8 +403,7 @@ class Gemini(loader.Module):
                     last_error = e
                     break
         try:
-            if not was_successful:
-                raise last_error or RuntimeError("Unknown generation error")
+            if not was_successful: raise last_error or RuntimeError("Unknown generation error")
             if self._is_memory_enabled(str(chat_id)):
                 self._update_history(chat_id, current_turn_parts, result_text, regeneration, msg_obj, gauto=impersonation_mode)
             if impersonation_mode: return result_text
@@ -406,14 +416,25 @@ class Gemini(loader.Module):
             question_html = f"<blockquote>{utils.escape_html(request_text_for_display[:200])}</blockquote>"
             text_to_send = f"{mem_ind}\n\n{self.strings['question_prefix']}\n{question_html}\n\n{self.strings['response_prefix']}{search_icon}\n{formatted_body}"
             buttons = self._get_inline_buttons(chat_id, base_message_id) if self.config["interactive_buttons"] else None
-            if len(text_to_send) > 4096:
+            is_long_text = len(result_text) > 3500
+            if is_long_text and self.config["inline_pagination"]:
+                chunks = self._paginate_text(result_text, 3000)
+                uid = uuid.uuid4().hex[:6]
+                header = f"{mem_ind}\n\n{self.strings['question_prefix']} <blockquote>{utils.escape_html(request_text_for_display[:100])}...</blockquote>\n\n{self.strings['response_prefix']}{search_icon}\n"
+                self.pager_cache[uid] = {
+                    "chunks": chunks, 
+                    "total": len(chunks), 
+                    "header": header,
+                    "chat_id": chat_id,
+                    "msg_id": base_message_id
+                }
+                await self._render_page(uid, 0, call or status_msg)
+            elif len(text_to_send) > 4096:
                 file_content = (f"Вопрос: {display_prompt}\n\n════════════════════\n\nОтвет Gemini:\n{result_text}")
-                file = io.BytesIO(file_content.encode("utf-8"))
-                file.name = "Gemini_response.txt"
+                file = io.BytesIO(file_content.encode("utf-8")); file.name = "Gemini_response.txt"
                 if call:
                     await call.answer("Ответ длинный, отправляю файлом...", show_alert=False)
                     await self.client.send_file(call.chat_id, file, caption=self.strings["response_too_long"], reply_to=call.message_id)
-                    await call.edit(f"✅ {self.strings['response_too_long']}", reply_markup=None)
                 elif status_msg:
                     await status_msg.delete()
                     await self.client.send_file(chat_id, file, caption=self.strings["response_too_long"], reply_to=base_message_id)
@@ -452,6 +473,78 @@ class Gemini(loader.Module):
         )
 
     @loader.command()
+    async def gimg(self, message: Message):
+        """<промпт> [реплай на фото] — Генерация/Редактирование изображений через Gemini."""
+        args = utils.get_args_raw(message)
+        reply = await message.get_reply_message()
+        input_bytes = None
+        if reply:
+            if reply.photo:
+                input_bytes = await self.client.download_media(reply, bytes)
+            elif reply.document and reply.document.mime_type.startswith("image/"):
+                input_bytes = await self.client.download_media(reply, bytes)
+        if not args and not input_bytes:
+            return await utils.answer(message, "🎨 <b>Введите промпт.</b>\nПример: <code>.gimg кот в космосе</code>")
+        prompt = args if args else "Describe/Modify this image"
+        model = self.config["image_model_name"]
+        m = await utils.answer(message, self.strings["gimg_process"].format(model=model))
+        try:
+            res = await self._call_google_rest(model, prompt, input_bytes)
+            if "error" in res:
+                err_msg = res["error"]["message"]
+                try: err_msg = json.loads(err_msg)["error"]["message"]
+                except: pass
+                raise ValueError(err_msg)
+            
+            img_bytes = None
+            try:
+                parts = res["candidates"][0]["content"]["parts"]
+                for part in parts:
+                    if "inlineData" in part:
+                        img_bytes = base64.b64decode(part["inlineData"]["data"])
+                        break
+            except Exception as e:
+                raise ValueError(f"Ошибка парсинга ответа: {e}")
+            if not img_bytes:
+                raise ValueError("Модель не вернула изображение (возможно, сработал Safety Filter).")
+            out = io.BytesIO(img_bytes)
+            out.name = f"gemini_{uuid.uuid4().hex[:6]}.jpg"
+            await self.client.send_file(
+                utils.get_chat_id(message),
+                out,
+                caption=f"🎨 <b>Gemini Image</b>\n🧠 <code>{model}</code>\n📜 <code>{utils.escape_html(prompt[:100])}</code>",
+                reply_to=message.id
+            )
+            await m.delete()
+        except Exception as e:
+            await utils.answer(m, f"❌ <b>Ошибка:</b>\n<code>{utils.escape_html(str(e))}</code>")
+
+    @loader.command()
+    async def gskey(self, message: Message):
+        """[-h] — Сканировать ключи. -h: показать статус из кеша без проверки."""
+        args = utils.get_args_raw(message).strip()
+        if args in ["-h", "--having", "having"]:
+            premium = sum(1 for v in self.key_model_map.values() if v == 1)
+            free = sum(1 for v in self.key_model_map.values() if v == 0)
+            report = (
+                f"📊 <b>Статус ключей (кеш):</b>\n"
+                f"💎 <b>Premium/Active:</b> {premium}\n"
+                f"👻 <b>Free/Unknown:</b> {free}\n"
+                f"🔑 <b>Всего в конфиге:</b> {len(self.api_keys)}"
+            )
+            return await utils.answer(message, report)
+        await utils.answer(message, "<emoji document_id=5386367538735104399>⌛️</emoji> <b>Сканирую ключи...</b>\n<i>Это займет время (1.2 сек на ключ).</i>")
+        report, invalid_keys = await self._scan_keys(force=True)
+        if invalid_keys:
+            txt_keys = "\n".join(invalid_keys)
+            try:
+                await self.client.send_message("me", f"🚫 <b>Gemini: Найдены невалидные ключи:</b>\nУдали их из конфига:\n\n<code>{txt_keys}</code>")
+                report += "\n\n⚠️ <b>Список невалидных ключей отправлен в Избранное.</b>"
+            except:
+                report += "\n\n⚠️ <b>Найдены невалидные ключи.</b>"
+        await utils.answer(message, report)
+
+    @loader.command()
     async def gch(self, message: Message):
         """<[id чата]> <кол-во> <вопрос> - Проанализировать историю чата."""
         args_str = utils.get_args_raw(message)
@@ -479,6 +572,8 @@ class Gemini(loader.Module):
             entity = await self.client.get_entity(target_chat_id)
             chat_name = utils.escape_html(get_display_name(entity))
             chat_log = await self._get_recent_chat_text(target_chat_id, count=count, skip_last=False)
+        except (ValueError, TypeError, ChatAdminRequiredError, UserNotParticipantError, ChannelPrivateError) as e:
+            return await utils.answer(status_msg, self.strings["gch_chat_error"].format(target_chat_id, e.__class__.__name__))
         except Exception as e:
             return await utils.answer(status_msg, self.strings["gch_chat_error"].format(target_chat_id, e))
         full_prompt = (
@@ -671,7 +766,6 @@ class Gemini(loader.Module):
             import json
             hist = json.loads(f)
             if not isinstance(hist, list): raise ValueError
-            
             cid = utils.get_chat_id(message)
             target = self.gauto_conversations if gauto else self.conversations
             target[str(cid)] = hist
@@ -681,7 +775,7 @@ class Gemini(loader.Module):
 
     @loader.command()
     async def gmemfind(self, message: Message):
-        """[слово] — Поиск по истории текущего чата по ключевому слову или фразе."""
+        """[слово] — Поиск в памяти текущего чата по ключевому слову или фразе."""
         q = utils.get_args_raw(message).lower()
         if not q: return await utils.answer(message, "Укажите слово для поиска.")
         cid = utils.get_chat_id(message)
@@ -755,6 +849,118 @@ class Gemini(loader.Module):
             self._save_history_sync(False)
             await utils.answer(message, self.strings["memory_fully_cleared"].format(n))
 
+    @loader.callback_handler()
+    async def gemini_callback_handler(self, call: InlineCall):
+        if not call.data.startswith("gemini:"): return
+        parts = call.data.split(":")
+        action = parts[1]
+        if action == "noop": 
+            await call.answer()
+            return
+        if action == "pg":
+            uid = parts[2]
+            page = int(parts[3])
+            await self._render_page(uid, page, call)
+            return
+
+    async def _clear_callback(self, call: InlineCall, cid):
+        self._clear_history(cid, gauto=False)
+        await call.edit(self.strings["memory_cleared"], reply_markup=None)
+
+    async def _regenerate_callback(self, call: InlineCall, mid, cid):
+        key = f"{cid}:{mid}"
+        if key not in self.last_requests: return await call.answer(self.strings["no_last_request"], show_alert=True)
+        parts, disp = self.last_requests[key]
+        use_url_context = bool(re.search(r'https?://\S+', disp or ""))
+        await self._send_to_gemini(mid, parts, regeneration=True, call=call, chat_id_override=cid, display_prompt=disp, use_url_context=use_url_context)
+
+    async def _close_callback(self, call: InlineCall, uid: str):
+        """Обрабатывает нажатие кнопки закрытия для пагинации"""
+        await call.answer()
+        if uid in self.pager_cache:
+            del self.pager_cache[uid]
+        try:
+            await self.client.delete_messages(call.chat_id, call.message_id)
+        except Exception:
+            try:
+                await call.edit("✔️ Сессия закрыта.", reply_markup=None)
+            except Exception:
+                pass
+
+    async def _render_page(self, uid, page_num, entity):
+        data = self.pager_cache.get(uid)
+        if not data:
+            if isinstance(entity, InlineCall):
+                await entity.edit("⚠️ <b>Сессия истекла (RAM cleared).</b>", reply_markup=None)
+            return
+        chunks = data["chunks"]
+        total = data["total"]
+        header = data.get("header", "")
+        raw_text_chunk = chunks[page_num]
+        safe_text = self._markdown_to_html(raw_text_chunk)
+        text_to_show = f"{header}<blockquote expandable>{safe_text}</blockquote>"
+        nav_row = []
+        if page_num > 0:
+            nav_row.append({"text": "◀️", "data": f"gemini:pg:{uid}:{page_num - 1}"})
+        nav_row.append({"text": f"{page_num + 1}/{total}", "data": "gemini:noop"})
+        if page_num < total - 1:
+            nav_row.append({"text": "▶️", "data": f"gemini:pg:{uid}:{page_num + 1}"})
+        extra_row = [{"text": "❌ Закрыть", "callback": self._close_callback, "args": (uid,)}]
+        if data.get("chat_id") and data.get("msg_id"):
+             extra_row.append({"text": "🔄", "callback": self._regenerate_callback, "args": (data['msg_id'], data['chat_id'])})
+        buttons = [nav_row, extra_row]
+        if isinstance(entity, Message):
+            await self.inline.form(text=text_to_show, message=entity, reply_markup=buttons)
+        elif isinstance(entity, InlineCall):
+            await entity.edit(text=text_to_show, reply_markup=buttons)
+        elif hasattr(entity, "edit"):
+            try: await entity.edit(text=text_to_show, reply_markup=buttons)
+            except: pass
+
+    def _paginate_text(self, text: str, limit: int) -> list:
+        pages = []
+        current_page_lines = []
+        current_len = 0
+        in_code_block = False
+        current_code_lang = ""
+        lines = text.split('\n')
+        for line in lines:
+            line_len = len(line) + 1
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                if in_code_block:
+                    in_code_block = False
+                    current_code_lang = ""
+                else:
+                    in_code_block = True
+                    current_code_lang = stripped.replace("```", "").strip()
+            if current_len + line_len > limit:
+                if current_page_lines:
+                    if in_code_block: current_page_lines.append("```")
+                    pages.append("\n".join(current_page_lines))
+                    current_page_lines = []
+                    current_len = 0
+                    if in_code_block:
+                        header = f"```{current_code_lang}"
+                        current_page_lines.append(header)
+                        current_len += len(header) + 1
+                if line_len > limit:
+                    chunks = [line[i:i+limit] for i in range(0, len(line), limit)]
+                    for chunk in chunks:
+                        if current_len + len(chunk) > limit:
+                             pages.append("\n".join(current_page_lines))
+                             current_page_lines = [chunk]
+                             current_len = len(chunk)
+                        else:
+                            current_page_lines.append(chunk)
+                            current_len += len(chunk)
+                    continue
+            current_page_lines.append(line)
+            current_len += line_len
+        if current_page_lines:
+            pages.append("\n".join(current_page_lines))
+        return pages
+
     @loader.watcher(only_incoming=True, ignore_edited=True)
     async def watcher(self, message: Message):
         if not hasattr(message, 'chat_id'): return
@@ -806,10 +1012,13 @@ class Gemini(loader.Module):
         user_id = self.me.id
         user_name = get_display_name(self.me)
         message_id = getattr(message, "id", None)
-        
         if message:
-            if message.sender_id:
-                user_id = message.sender_id
+            try:
+                peer_id = get_peer_id(message)
+                if peer_id:
+                    user_id = peer_id
+            except (TypeError, ValueError):
+                if message.sender_id: user_id = message.sender_id
             if message.sender:
                 user_name = get_display_name(message.sender)
         user_text = " ".join([p.text for p in user_parts if hasattr(p, "text") and p.text]) or "[ответ на медиа]"
@@ -838,7 +1047,6 @@ class Gemini(loader.Module):
                 "date": now,
                 "user_id": None 
             }
-            
             history.extend([user_entry, model_entry])
         limit = self.config["max_history_length"]
         if limit > 0 and len(history) > limit * 2:
@@ -852,8 +1060,6 @@ class Gemini(loader.Module):
         if str(cid) in d:
             del d[str(cid)]
             self._save_history_sync(gauto)
-
-    def _is_memory_enabled(self, cid): return cid not in self.memory_disabled_chats
 
     def _markdown_to_html(self, text):
         text = re.sub(r"^(#+)\s+(.*)", lambda m: f"<b>{m.group(2)}</b>", text, flags=re.M)
@@ -911,42 +1117,34 @@ class Gemini(loader.Module):
                 if txt.strip(): lines.append(f"{name}: {txt.strip()}")
         except: pass
         return "\n".join(reversed(lines))
-    
+
     def _handle_error(self, e: Exception) -> str:
         logger.exception("Gemini execution error")
         if isinstance(e, asyncio.TimeoutError):
             return self.strings["api_timeout"]
+        if google_exceptions and isinstance(e, google_exceptions.GoogleAPIError):
+            msg = str(e)
+            if "quota" in msg.lower() or "exceeded" in msg.lower():
+                model = self.config.get("model_name", "unknown")
+                return (
+                    f"❗️ <b>Превышен лимит Google Gemini API для модели <code>{utils.escape_html(model)}</code>.</b>\n"
+                    f"<b>Детали ошибки:</b>\n<code>{utils.escape_html(msg)}</code>"
+                )
+            if "User location is not supported" in msg or "location is not supported" in msg:
+                 return (
+                    '❗️ <b>В данном регионе Gemini API не доступен.</b>\n'
+                    'Используйте VPN или прокси.'
+                )
+            if "API key not valid" in msg:
+                 return self.strings["invalid_api_key"]
+            if "blocked" in msg.lower():
+                 return self.strings["blocked_error"].format(utils.escape_html(msg))
+            return self.strings["api_error"].format(utils.escape_html(msg))
+        if isinstance(e, (OSError, socket.timeout)):
+            return "❗️ <b>Сетевая ошибка:</b>\n<code>{}</code>".format(utils.escape_html(str(e)))
         msg = str(e)
-        if "quota" in msg.lower() or "exhausted" in msg.lower() or "429" in msg:
-            model = self.config.get("model_name", "unknown")
-            return (
-                f"❗️ <b>Превышен лимит Google Gemini API для модели <code>{utils.escape_html(model)}</code>.</b>"
-                "\n\nЧаще всего это происходит на бесплатном тарифе. Вы можете:\n"
-                "• Подождать, пока лимит сбросится (обычно раз в сутки).\n"
-                "• Проверить свой тарифный план в <a href='https://aistudio.google.com/app/billing'>Google AI Studio</a>.\n"
-                "• Узнать больше о лимитах <a href='https://ai.google.dev/gemini-api/docs/rate-limits'>здесь</a>.\n\n"
-                f"<b>Детали ошибки:</b>\n<code>{utils.escape_html(msg)}</code>"
-            )
-        if "location" in msg.lower() or "not supported" in msg.lower():
-             return (
-                '❗️ <b>В данном регионе Gemini API не доступен.</b>\n'
-                'Скачайте VPN (для пк/тел) или поставьте прокси (платный/бесплатный).\n'
-                'Или воспользуйтесь инструкцией <a href="https://t.me/SenkoGuardianModules/23">вот тут</a>\n'
-                'А для тех у кого UserLand инструкция <a href="https://t.me/SenkoGuardianModules/35">тут</a>'
-            )
-        if "key" in msg.lower() and "valid" in msg.lower():
-             return self.strings["invalid_api_key"]
-        if "blocked" in msg.lower():
-             return self.strings["blocked_error"].format(utils.escape_html(msg))
-        if "500" in msg:
-             return (
-                "❗️ <b>Ошибка 500 от Google API.</b>\n"
-                "Это значит, что формат медиа (файл или еще что то) который ты отправил, не поддерживается.\n"
-                "Такое случается, по такой причине:\n  "
-                "• Если формат файла в принципе не поддерживается Gemini/Гуглом.\n  "
-                "• Временный сбой на серверах Google. Попробуйте повторить запрос позже."
-            )
-        return self.strings["api_error"].format(utils.escape_html(msg))
+        if "quota" in msg.lower() or "429" in msg: return self.strings["all_keys_exhausted"].format(len(self.api_keys))
+        return self.strings["generic_error"].format(utils.escape_html(msg))
 
     def _markdown_to_html(self, text: str) -> str:
         def heading_replacer(match): 
@@ -1001,24 +1199,7 @@ class Gemini(loader.Module):
 
     async def _clear_callback(self, call: InlineCall, chat_id: int):
         self._clear_history(chat_id, gauto=False)
-
         await call.edit(self.strings["memory_cleared"], reply_markup=None)
-    async def _regenerate_callback(self, call: InlineCall, original_message_id: int, chat_id: int):
-        key = f"{chat_id}:{original_message_id}"
-        last_request_tuple = self.last_requests.get(key)
-        if not last_request_tuple: 
-            return await call.answer(self.strings["no_last_request"], show_alert=True)
-        last_parts, display_prompt = last_request_tuple
-        use_url_context = bool(re.search(r'https?://\S+', display_prompt or ""))
-        await self._send_to_gemini(
-            message=original_message_id, 
-            parts=last_parts, 
-            regeneration=True, 
-            call=call, 
-            chat_id_override=chat_id, 
-            use_url_context=use_url_context, 
-            display_prompt=display_prompt
-        )
 
     async def _get_recent_chat_text(self, chat_id: int, count: int = None, skip_last: bool = False) -> str:
         history_limit = count or self.config["impersonation_history_limit"]
@@ -1048,6 +1229,111 @@ class Gemini(loader.Module):
         except Exception as e:
             logger.warning(f"Не удалось получить историю для авто-ответа: {e}")
         return "\n".join(reversed(chat_history_lines))
+
+    async def _scan_keys(self, force=False):
+        """
+        Сканирует ключи на валидность.
+        """
+        if not GOOGLE_AVAILABLE: return "Library missing", []
+        current_map_keys = list(self.key_model_map.keys())
+        for k in current_map_keys:
+            if k not in self.api_keys: del self.key_model_map[k]
+        if not force and all(k in self.key_model_map for k in self.api_keys):
+            return "Loaded from cache", []
+        if force: self.key_model_map = {}
+        proxy_config = self._get_proxy_config()
+        http_opts = types.HttpOptions(async_client_args={"proxies": proxy_config, "timeout": 10.0}) if proxy_config else None
+        active_keys = []
+        invalid_keys = []
+        minimal_config = types.GenerateContentConfig(
+            response_mime_type="text/plain",
+            max_output_tokens=1, 
+            candidate_count=1,
+            safety_settings=[types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE")]
+        )
+        for i, key in enumerate(self.api_keys):
+            if i > 0: await asyncio.sleep(1.2)
+            try:
+                client = genai.Client(api_key=key, http_options=http_opts)
+                response = await client.aio.models.generate_content(
+                    model=CHECK_MODEL, contents="test", config=minimal_config
+                )
+                active_keys.append(key)
+                self.key_model_map[key] = 1
+            except Exception as e:
+                err = str(e).lower()
+                if "invalid_argument" in err or "api_key_invalid" in err or "400" in err or "blocked" in err:
+                    invalid_keys.append(key)
+                else:
+                    self.key_model_map[key] = 0 
+        self.db.set(self.strings["name"], DB_KEY_MAP_KEY, self.key_model_map)
+        short_report = (
+            f"✅ <b>Скан завершен.</b>\n"
+            f"💎 <b>Active:</b> {len(active_keys)}\n"
+            f"🗑 <b>Invalid:</b> {len(invalid_keys)}\n"
+            f"👻 <b>RateLimited/Other:</b> {len(self.api_keys) - len(active_keys) - len(invalid_keys)}"
+        )
+        return short_report, invalid_keys
+
+    def _get_sorted_keys(self):
+        valid_keys = []
+        for key in self.api_keys:
+            if key not in self.key_model_map:
+                if not self.key_model_map: valid_keys.append((key, 0, random.random()))
+                continue
+            tier = self.key_model_map[key]
+            valid_keys.append((key, tier, random.random()))
+        valid_keys.sort(key=lambda x: (x[1], x[2]))
+        return [item[0] for item in valid_keys]
+
+    async def _call_google_rest(self, model_name: str, prompt: str, input_image_bytes=None):
+        keys = self._get_sorted_keys()
+        if not keys: return {"error": {"message": "Нет доступных API ключей"}}
+        parts = [{"text": prompt}]
+        if input_image_bytes:
+            resized = await utils.run_sync(self._resize_image_ig, input_image_bytes)
+            b64_img = base64.b64encode(resized).decode('utf-8')
+            parts.insert(0, {"inlineData": {"mimeType": "image/jpeg", "data": b64_img}})
+        payload = {
+            "contents": [{"parts": parts}],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ],
+            "generationConfig": {"candidateCount": 1, "temperature": 1.0}
+        }
+        proxy = self.config['proxy'] if self.config['proxy'] else None
+        last_error = None
+        async with aiohttp.ClientSession() as session:
+            for i, api_key in enumerate(keys):
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                try:
+                    if i > 0: await asyncio.sleep(1)
+                    async with session.post(url, json=payload, proxy=proxy, timeout=60) as resp:
+                        if resp.status == 200:
+                            return await resp.json()
+                        elif resp.status in [429, 503]:
+                            last_error = f"HTTP {resp.status}"
+                            continue
+                        else:
+                            text = await resp.text()
+                            return {"error": {"message": f"HTTP {resp.status}: {text}"}}
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+        return {"error": {"message": f"All keys exhausted. Last error: {last_error}"}}
+
+    def _resize_image_ig(self, img_bytes):
+        try:
+            img = Image.open(io.BytesIO(img_bytes))
+            img.thumbnail((1024, 1024)) 
+            out = io.BytesIO()
+            if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+            img.save(out, format='JPEG', quality=85)
+            return out.getvalue()
+        except: return img_bytes
 
     def _is_memory_enabled(self, chat_id: str) -> bool: return chat_id not in self.memory_disabled_chats
     def _disable_memory(self, chat_id: int): self.memory_disabled_chats.add(str(chat_id))
