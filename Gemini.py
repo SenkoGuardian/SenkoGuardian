@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (5, 8, 0) #хезе
+__version__ = (5, 8, 1) #фыр
 
 # meta developer: @SenkoGuardianModules
 
@@ -193,6 +193,7 @@ class Gemini(loader.Module):
             self.pager_cache = {}
             self.key_model_map = {}
             self.prompt_presets = []
+            self.api_keys = [] 
 
     async def client_ready(self, client, db):
         self.client = client
@@ -1314,7 +1315,7 @@ class Gemini(loader.Module):
                     async with session.post(url, json=payload, proxy=proxy, timeout=60) as resp:
                         if resp.status == 200:
                             return await resp.json()
-                        elif resp.status in [429, 503]:
+                        elif resp.status in [429, 503, 403]:
                             last_error = f"HTTP {resp.status}"
                             continue
                         else:
