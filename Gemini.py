@@ -38,6 +38,7 @@ try:
 except ImportError:
     GOOGLE_AVAILABLE = False
     google_exceptions = None
+    types = None
 
 from PIL import Image
 from datetime import datetime
