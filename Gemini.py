@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (6, 0, 1) #фыр
+__version__ = (6, 0, 0) #фыр
 
 # meta developer: @SenkoGuardianModules
 
@@ -38,7 +38,6 @@ try:
 except ImportError:
     GOOGLE_AVAILABLE = False
     google_exceptions = None
-    types = None
 
 from PIL import Image
 from datetime import datetime
