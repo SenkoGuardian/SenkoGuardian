@@ -3,7 +3,7 @@
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
-__version__ = (6, 0, 0) #фыр
+__version__ = (6, 0, 1) #фыр
 
 # meta developer: @SenkoGuardianModules
 
