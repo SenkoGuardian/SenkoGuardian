@@ -7,7 +7,7 @@
 # meta banner: https://raw.githubusercontent.com/SenkoGuardian/SenkoGuardian.github.io/main/OfficialSenkoGuardianBanner.png
 # meta pic: https://raw.githubusercontent.com/SenkoGuardian/SenkoGuardian.github.io/main/OfficialSenkoGuardianBanner.png
 
-__version__ = ("1", "0", "1") # в этот раз комменты свои добавил что бы было понятно кратко, что да как.
+__version__ = ("1", "0", "2") # в этот раз комменты свои добавил что бы было понятно кратко, что да как.
 
 """￣へ￣"""
 
@@ -145,6 +145,8 @@ class ChatCopy(loader.Module):
         "task_detail_completed": "<b>✅ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>Завершена</code>\n├ Переслано: <code>{count}</code> сообщений\n├ Длительность: <code>{duration}</code>\n├ Средняя скорость: <code>{avg_speed}/мин</code>\n├ Завершено: <code>{end_time}</code>\n└ FloodWait'ов: <code>{floods}</code>",
         "task_detail_error": "<b>❌ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>Ошибка</code>\n└ Попробуйте перезапустить",
         "no_tasks": "<i>Нет активных задач</i>",
+        "preparing_prem": "<emoji document_id=5208722554591659638>💫</emoji> <b>Подготовка к копированию. Подсчитываем (да, вручную!) кол-во медиа, это может занять время...</b>",
+        "preparing_no_prem": "⌛️ <b>Подготовка к копированию. Подсчитываем кол-во медиа, это может занять время...</b>",
     }
 
     def __init__(self):
@@ -568,11 +570,14 @@ class ChatCopy(loader.Module):
             await asyncio.sleep(delay)
         return total_sent
 
-    async def worker(self): # обычный, нищи воркер для ватчера
+    async def worker(self): #воркер для Watcher'а
         while True:
             item = await self.queue.get()
             try:
-                watch_cid = item.pop("watch_cid")
+                watch_cid = item.get("watch_cid")
+                if watch_cid and watch_cid not in self.watchlist:
+                    logger.debug(f"Игнорируем сообщение для {watch_cid}, слежка была остановлена")
+                    continue
                 result = await self._process_batch(**item)
                 if watch_cid and item.get("messages"):
                     last_msg = item["messages"][-1]
@@ -877,18 +882,34 @@ class ChatCopy(loader.Module):
         if src_is_forum and not dest_is_forum:
             forum_result = await self._ensure_forum_enabled(dest)
             if forum_result:
+                await utils.answer(message, self.strings["forum_enabled"].format(
+                    chat=utils.escape_html(getattr(dest, 'title', dest.id))
+                ))
+                dest = await self.client.get_entity(dest.id)
+            else:
+                return await utils.answer(message, self.strings["forum_enable_failed"].format(
+                    chat=utils.escape_html(getattr(dest, 'title', dest.id))
+                ))
+        prep_key = "preparing_prem" if self.is_premium else "preparing_no_prem"
+        status_msg = await utils.answer(message, self.strings[prep_key])
+        total_msgs = 0
+        try:
+            async for _ in self.client.iter_messages(
+                src,
+                min_id=start_id-1 if start_id else 0,
+                max_id=final_id+1 if final_id else 0
+            ):
+                total_msgs += 1
+                if total_msgs > 150000:
+                    break
+        except:
+            pass
+            forum_result = await self._ensure_forum_enabled(dest)
+            if forum_result:
                 await utils.answer(message, self.strings["forum_enabled"].format(chat=utils.escape_html(getattr(dest, 'title', dest.id))))
                 dest = await self.client.get_entity(dest.id)
             else:
                 return await utils.answer(message, self.strings["forum_enable_failed"].format(chat=utils.escape_html(getattr(dest, 'title', dest.id))))
-        total_msgs = 0
-        try:
-            async for _ in self.client.iter_messages(src, min_id=start_id-1 if start_id else 0, max_id=final_id+1 if final_id else 0):
-                total_msgs += 1
-                if total_msgs > 100000:
-                    break
-        except:
-            pass
         src_name = getattr(src, 'title', src.id)
         dest_name = getattr(dest, 'title', dest.id)
         async with self._queue_lock:
@@ -1749,10 +1770,10 @@ class ChatCopy(loader.Module):
     async def _cb_back(self, call):  #кнопка назад
         await self._show_main_panel(call, edit=True)
 
-    async def _stop_watch(self, call, cid): #стопаем ватчер тута
+    async def _stop_watch(self, call, cid): #стопаем ватчер тута, исправлен баг
         if cid in self.watchlist:
             if cid in self.watcher_buffer:
-                del self.watcher_buffer[cid]
+                self.watcher_buffer[cid] = []
             if cid in self.watcher_flush_tasks:
                 self.watcher_flush_tasks[cid].cancel()
                 del self.watcher_flush_tasks[cid]
