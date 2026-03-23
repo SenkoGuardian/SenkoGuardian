@@ -7,7 +7,7 @@
 # meta banner: https://raw.githubusercontent.com/SenkoGuardian/SenkoGuardian.github.io/main/OfficialSenkoGuardianBanner.png
 # meta pic: https://raw.githubusercontent.com/SenkoGuardian/SenkoGuardian.github.io/main/OfficialSenkoGuardianBanner.png
 
-__version__ = ("1", "0", "0") # в этот раз комменты свои добавил что бы было понятно кратко, что да как.
+__version__ = ("1", "0", "1") # в этот раз комменты свои добавил что бы было понятно кратко, что да как.
 
 """￣へ￣"""
 
@@ -1322,6 +1322,85 @@ class ChatCopy(loader.Module):
                         await asyncio.sleep(self.config["delay"])
             except Exception:
                 pass
+
+    @loader.command()
+    async def cchelp(self, message: Message):
+        """— Подробная документация по модулю ChatCopy"""
+        help_text_prem = (
+            '<emoji document_id=6030550768426159669>🛡</emoji> <b>Подробная документация по модулю ChatCopy!</b>\n\n'
+            '<blockquote expandable><emoji document_id=5398049016556560225>1️⃣</emoji><b> Основные команды </b>\n'
+            '<emoji document_id=5314310000531766389>🛫</emoji> <code>.chatcopy &lt;откуда&gt; &lt;куда&gt;[диапазон (от:до)] [флаги (можно несколько)]</code>\n'
+            '<i>Копирует старую историю чата (делает дамп). Ставит задачу в очередь в случае если другая была запущена.</i>\n\n'
+            '<emoji document_id=6028228780256923695>👀</emoji> <code>.ccwatch &lt;откуда&gt; &lt;куда&gt; [диапазон (от:до)] [флаги (можно несколько)]</code>\n'
+            '<i>Режим слежки. Модуль будет висеть в фоне и моментально пересылать все новые сообщения. Функции [от:до] аналогичны </i><code>.chatcopy</code>\n\n'
+            '<emoji document_id=5355012477883004708>📺</emoji> <code>.ccpanel</code>\n'
+            '<i>Открывает меню: управление задачами, пауза/стоп, статистика и настройки (скорость, задержка).</i>\n\n'
+            '<emoji document_id=6028352582689231001>🗑</emoji> <code>.ccclear topics</code>\n'
+            '<i>Очищает кэш топиков (полезно, если форум сломался и пересылает не в те разделы).</i></blockquote>\n\n'
+            '<blockquote expandable><emoji document_id=5397653273974939567>2️⃣</emoji><b> Источники и Диапазоны([от:до] функция) (ID)</b>\n'
+            '<emoji document_id=5208758520647800433>✨</emoji> <b>Чаты:</b> Можно использовать юзернеймы (@chat), ID (-100123...) или прямые ссылки на топики (<a href="t.me/c/123/45">t.me/c/123/45</a>). Модуль сам всё распознает.\n'
+            '<emoji document_id=5208556360832141255>⚪️</emoji> <b>Диапазон [start:end]:</b> Пишется слитно, без пробелов.\n'
+            '<emoji document_id=5208556360832141255>⚪️</emoji> <code>100:500</code> — скопировать с 100-го по 500-е сообщение.\n'
+            '<emoji document_id=5208556360832141255>⚪️</emoji> <code>100:</code> — от 100-го до самых свежих.\n'
+            '<emoji document_id=5208556360832141255>⚪️</emoji> <code>:500</code> — с самого начала чата и до 500-го.</blockquote>\n\n'
+            '<blockquote expandable><emoji document_id=5397646938898178715>3️⃣</emoji><b> Флаги (Настройки текста)</b>\n'
+            '<emoji document_id=5208809016578296327>👤</emoji> <code>-n</code> — Скрыть автора (пересылка без плашки «Переслано от...»).\n'
+            '<emoji document_id=6028504027531055196>💬</emoji> <code>-dmc</code> — Удалить подпись к медиа (оставит только голую картинку или файл, удалив текст под ним)(!Работает только с[-n] флагом!).</blockquote>\n\n'
+            '<blockquote expandable><emoji document_id=5397754265835938409>4️⃣</emoji><b> Фильтры контента</b>\n'
+            '<i>(Указывайте только один! Если не указать ничего — скопируется всё подряд)</i>\n'
+            '<emoji document_id=5208795483136348193>📌</emoji> <code>--media</code> — Любые медиа (фото, видео) и документы.\n'
+            '<emoji document_id=5208443446141928861>📷</emoji> <code>--photo_video</code> — Строго только фото и видео (без гифок/стикеров).\n'
+            '<emoji document_id=5208670581192411812>💼</emoji> <code>--docs</code> — Строго только документы (файлы, архивы, apk).\n'
+            '<emoji document_id=6028504027531055196>💬</emoji> <code>--text</code> — Только чисто текстовые сообщения.</blockquote>\n\n'
+            '<blockquote expandable><emoji document_id=5208550511086683412>💡</emoji><b> Полные примеры использования</b>\n'
+            '<b>1. Полная копия канала со скрытием автора:</b>\n'
+            '<emoji document_id=5296587908906511469>➡️</emoji> <code>.chatcopy @donor_channel @my_channel -n</code>\n\n'
+            '<b>2. Слежка за конкретным топиком (воруем только фото/видео без подписей):</b>\n'
+            '<emoji document_id=5296587908906511469>➡️</emoji> <code>.ccwatch <a href="t.me/c/123/4">t.me/c/123/4</a> <a href="t.me/c/321/5">t.me/c/321/5</a> -dmc --photo_video</code>\n\n'
+            '<b>3. Скопировать историю с 5000 по 6000 сообщение, только текст:</b>\n'
+            '<emoji document_id=5296587908906511469>➡️</emoji> <code>.chatcopy -100111 -100222 5000:6000 --text</code></blockquote>\n\n'
+            '<emoji document_id=5307554373457440075>💎</emoji> Приятного пользования!\n'
+            '<emoji document_id=5345814569195421891>❕</emoji> Единственный минус, не копирует с чатов с запрещенным копированием.'
+        )
+
+        help_text_no_prem = (
+            '🛡 <b>Подробная документация по модулю ChatCopy!</b>\n\n'
+            '<blockquote expandable>1️⃣<b> Основные команды </b>\n'
+            '🛫 <code>.chatcopy &lt;откуда&gt; &lt;куда&gt;[диапазон (от:до)] [флаги (можно несколько)]</code>\n'
+            '<i>Копирует старую историю чата (делает дамп). Ставит задачу в очередь в случае если другая была запущена.</i>\n\n'
+            '👀 <code>.ccwatch &lt;откуда&gt; &lt;куда&gt; [диапазон (от:до)] [флаги (можно несколько)]</code>\n'
+            '<i>Режим слежки. Модуль будет висеть в фоне и моментально пересылать все новые сообщения. Функции [от:до] аналогичны </i><code>.chatcopy</code>\n\n'
+            '📺 <code>.ccpanel</code>\n'
+            '<i>Открывает меню: управление задачами, пауза/стоп, статистика и настройки (скорость, задержка).</i>\n\n'
+            '🗑 <code>.ccclear topics</code>\n'
+            '<i>Очищает кэш топиков (полезно, если форум сломался и пересылает не в те разделы).</i></blockquote>\n\n'
+            '<blockquote expandable>2️⃣<b> Источники и Диапазоны([от:до] функция) (ID)</b>\n'
+            '✨ <b>Чаты:</b> Можно использовать юзернеймы (@chat), ID (-100123...) или прямые ссылки на топики (<a href="t.me/c/123/45">t.me/c/123/45</a>). Модуль сам всё распознает.\n'
+            '⚪️ <b>Диапазон [start:end]:</b> Пишется слитно, без пробелов.\n'
+            '⚪️ <code>100:500</code> — скопировать с 100-го по 500-е сообщение.\n'
+            '⚪️ <code>100:</code> — от 100-го до самых свежих.\n'
+            '⚪️ <code>:500</code> — с самого начала чата и до 500-го.</blockquote>\n\n'
+            '<blockquote expandable>3️⃣<b> Флаги (Настройки текста)</b>\n'
+            '👤 <code>-n</code> — Скрыть автора (пересылка без плашки «Переслано от...»).\n'
+            '💬 <code>-dmc</code> — Удалить подпись к медиа (оставит только голую картинку или файл, удалив текст под ним)(!Работает только с [-n] флагом!).</blockquote>\n\n'
+            '<blockquote expandable>4️⃣<b> Фильтры контента</b>\n'
+            '<i>(Указывайте только один! Если не указать ничего — скопируется всё подряд)</i>\n'
+            '📌 <code>--media</code> — Любые медиа (фото, видео) и документы.\n'
+            '📷 <code>--photo_video</code> — Строго только фото и видео (без гифок/стикеров).\n'
+            '💼 <code>--docs</code> — Строго только документы (файлы, архивы, apk).\n'
+            '💬 <code>--text</code> — Только чисто текстовые сообщения.</blockquote>\n\n'
+            '<blockquote expandable>💡<b> Полные примеры использования</b>\n'
+            '<b>1. Полная копия канала со скрытием автора:</b>\n'
+            '➡️ <code>.chatcopy @donor_channel @my_channel -n</code>\n\n'
+            '<b>2. Слежка за конкретным топиком (воруем только фото/видео без подписей):</b>\n'
+            '➡️ <code>.ccwatch <a href="t.me/c/123/4">t.me/c/123/4</a> <a href="t.me/c/321/5">t.me/c/321/5</a> -dmc --photo_video</code>\n\n'
+            '<b>3. Скопировать историю с 5000 по 6000 сообщение, только текст:</b>\n'
+            '➡️ <code>.chatcopy -100111 -100222 5000:6000 --text</code></blockquote>\n\n'
+            '💎 Приятного пользования!\n'
+            '❕ Единственный минус, не копирует с чатов с запрещенным копированием.'
+        )
+        final_text = help_text_prem if self.is_premium else help_text_no_prem
+        await utils.answer(message, final_text)
 
     @loader.command()
     async def ccpanel(self, message: Message):
