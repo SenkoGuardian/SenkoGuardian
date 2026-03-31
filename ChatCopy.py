@@ -1,5 +1,5 @@
 #  This file is part of SenkoGuardianModules
-#  Copyright (c) 2025 Senko
+#  Copyright (c) 2025-2026 Senko
 #  This software is released under the MIT License.
 #  https://opensource.org/licenses/MIT
 
@@ -7,7 +7,7 @@
 # meta banner: https://raw.githubusercontent.com/SenkoGuardian/SenkoGuardian.github.io/main/OfficialSenkoGuardianBanner.png
 # meta pic: https://raw.githubusercontent.com/SenkoGuardian/SenkoGuardian.github.io/main/OfficialSenkoGuardianBanner.png
 
-__version__ = ("1", "0", "2") # в этот раз комменты свои добавил что бы было понятно кратко, что да как.
+__version__ = ("1", "3", "0") # в этот раз комменты свои добавил что бы было понятно кратко, что да как и где что работает.
 
 """￣へ￣"""
 
@@ -27,18 +27,47 @@ import re
 import traceback
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+MSK = timezone(timedelta(hours=3), name="MSK")
 from telethon import functions, errors, types
 from telethon.tl.types import Message, Channel
 from .. import loader, utils
 
 logger = logging.getLogger(__name__)
 
+_cc_client = None
+_cc_log_channel = None
+_cc_log_topic_id = None
+
+class _CCTopicHandler(logging.Handler):
+
+    def emit(self, record):
+        if _cc_client is None or _cc_log_channel is None or _cc_log_topic_id is None:
+            return
+        try:
+            text = f"<code>[{record.levelname}]</code> {self.format(record)}"
+            asyncio.ensure_future(
+                _cc_client.send_message(
+                    int(f"-100{_cc_log_channel}"),
+                    text,
+                    parse_mode="html",
+                    reply_to=_cc_log_topic_id,
+                )
+            )
+        except Exception:
+            pass
+
+
+_cc_topic_handler = _CCTopicHandler()
+_cc_topic_handler.setLevel(logging.INFO)  # INFO чтобы видеть прогресс пересылки
+logger.addHandler(_cc_topic_handler)
+
 FILTER_ALL = "all"
 FILTER_MEDIA = "media"
 FILTER_PHOTO_VIDEO = "photo_video"
 FILTER_DOCS = "docs"
 FILTER_TEXT = "text"
+FILTER_NO_AD = "no_ad"
 
 @loader.tds
 class ChatCopy(loader.Module):
@@ -125,7 +154,7 @@ class ChatCopy(loader.Module):
         "forum_enable_failed": "❌ Не удалось включить топики в {chat}. Нужны права администратора.",
         "forum_not_channel": "❌ {chat} не является каналом/группой",
         "err_ent": "❌ Ошибка: Чат не найден или нет доступа.",
-        "args_err": "❌ Синтаксис: .chatcopy <src> <dest>[start_id:final_id] [-n] [-dmc][--media|--photo_video|--docs|--text]",
+        "args_err": "❌ Синтаксис: .chatcopy <src> <dest>[start_id:final_id] [-n] [-dmc] [--now] [--media|--photo_video|--docs|--text]",
         "watch_added": "<b>👀 Наблюдение активировано</b>\nID: <code>{src_id}</code>\n{src} -> {dest}\nРежим топиков: {topics}\nБез подписей: {no_capt}\nФильтр: {filter_type}",
         "queue_wait": "⏳ <b>Задача в очереди...</b> ({pos})",
         "topic_created": "📂 Создан топик: <b>{title}</b>",
@@ -140,7 +169,7 @@ class ChatCopy(loader.Module):
         "task_item_compact_completed": "✅{num}. <b>{src}</b> → <b>{dest}</b>",
         "task_item_compact_error": "❌{num}. <b>{src}</b> → <b>{dest}</b>",
         "task_detail_running": "<b>▶️ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>Выполняется</code>\n├ Прогресс: <code>{current}/{total}</code> ({progress}%)\n├ Скорость: <code>{speed}/мин</code>\n├ Прошло: <code>{elapsed}</code>\n├ Осталось: <code>{eta_left}</code>\n├ Начато: <code>{start_time}</code>\n├ Окончание: <code>{end_time}</code>\n└ Позиция: <code>{position}</code>",
-        "task_detail_queued": "<b>⏳ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>В очереди</code>\n├ Оценка сообщений: <code>~{total}</code>\n├ Начало через: <code>{eta_start}</code>\n├ Расчетное начало: <code>{start_time}</code>\n├ Расчетное окончание: <code>{end_time}</code>\n├ Позиция: <code>{position}</code>\n└ Расчетное время: <code>{estimated_duration}</code>",
+        "task_detail_queued": "<b>⏳ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>В очереди</code>\n├ Позиция: <code>{position}</code>\n├ Сообщений: <code>~{total}</code>\n├ Ожидание старта: <code>{eta_start}</code>\n└ Примерное время работы: <code>{estimated_duration}</code>",
         "task_detail_paused": "<b>⚠️ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>Пауза (FloodWait)</code>\n├ Прогресс: <code>{current}/{total}</code> ({progress}%)\n├ FloodWait'ов: <code>{flood_count}</code>\n├ Время ожидания: <code>{flood_time}</code>\n├ Продолжение: <code>{resume_time}</code>\n├ Скорость до паузы: <code>{speed}/мин</code>\n└ Осталось сообщений: <code>{remaining}</code>",
         "task_detail_completed": "<b>✅ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>Завершена</code>\n├ Переслано: <code>{count}</code> сообщений\n├ Длительность: <code>{duration}</code>\n├ Средняя скорость: <code>{avg_speed}/мин</code>\n├ Завершено: <code>{end_time}</code>\n└ FloodWait'ов: <code>{floods}</code>",
         "task_detail_error": "<b>❌ Задача #{num}</b>\n\n<b>{src}</b> → <b>{dest}</b>\n├ Статус: <code>Ошибка</code>\n└ Попробуйте перезапустить",
@@ -150,6 +179,7 @@ class ChatCopy(loader.Module):
     }
 
     def __init__(self):
+        self._tasks = []
         self.config = loader.ModuleConfig(
             loader.ConfigValue("batch_size", 100, lambda: self.strings["cfg_batch"], validator=loader.validators.Integer(minimum=1, maximum=100)),
             loader.ConfigValue("delay", 10, lambda: self.strings["cfg_delay"], validator=loader.validators.Integer(minimum=1)),
@@ -174,23 +204,71 @@ class ChatCopy(loader.Module):
         self.current_task_index = 0
         self.is_processing_queue = False
         self.task_progress_cache = {}
+        self.global_speed_history = [] 
         self.avg_speed_history = []
-        self.global_speed_history = []
         self._queue_lock = asyncio.Lock()
         self._task_counter = 0
 
     async def client_ready(self, client, db):
+        global _cc_client, _cc_log_channel, _cc_log_topic_id
         self.client = client
         self.db = db
         self.watchlist = self.db.get("ChatCopy", "watchlist", {})
         self.last_processed_ids = self.db.get("ChatCopy", "last_processed_ids", {})
         self.topic_mapping = self.db.get("ChatCopy", "topic_mapping", {})
         self.task_stats = self.db.get("ChatCopy", "task_stats", {})
+        self.task_queue = self.db.get("ChatCopy", "persistent_queue", [])
+        for task in self.task_queue:
+            task['status'] = 'queued'
         me = await client.get_me()
         self.is_premium = getattr(me, 'premium', False)
-        asyncio.create_task(self.worker())
-        asyncio.create_task(self.dump_worker())
-        asyncio.create_task(self._catch_up_on_restart())
+        try:
+            asset_channel = self._db.get("heroku.forums", "channel_id", 0)
+            if asset_channel:
+                notif_topic = await utils.asset_forum_topic(
+                    self._client,
+                    self._db,
+                    asset_channel,
+                    "ChatCopy Logs",
+                    description="ChatCopy module activity logs (warnings & errors).",
+                    icon_emoji_id=5372917041193828849,
+                )
+                _cc_client = self._client
+                _cc_log_channel = asset_channel
+                _cc_log_topic_id = notif_topic.id
+                logger.info("ChatCopy log topic ready (id=%s)", _cc_log_topic_id)
+        except Exception as _e:
+            logger.debug("ChatCopy log topic setup skipped: %s", _e)
+        self._tasks.extend([
+            asyncio.create_task(self.worker()),
+            asyncio.create_task(self.dump_worker()),
+            asyncio.create_task(self._catch_up_on_restart())
+        ])
+        if not self.task_queue:
+            return
+        logger.info(f"Возобновление {len(self.task_queue)} задач из очереди после перезапуска.")
+        for task in self.task_queue:
+            try:
+                src = await self.client.get_entity(task['src_id'])
+                dest = await self.client.get_entity(task['dest_id'])
+                class FakeMsg:
+                    id = None
+                    chat_id = task.get('status_chat_id')
+                    async def edit(self, *args, **kwargs): pass
+                await self.dump_queue.put({
+                    "status_msg": FakeMsg(),
+                    "src": src, "dest": dest,
+                    "no_auth": task['no_author'], "no_captions": task['no_captions'],
+                    "map_t": task.get('map_t', False), "f_src_t": task.get('f_src_t'),
+                    "f_dest_t": task.get('f_dest_t'), "tid": task['tid'],
+                    "min_id": task.get('last_processed_id', task.get('start_id', 0)),
+                    "max_id": task.get('final_id', 0),
+                    "filter_type": task['filter_type'], "src_name": task['src'],
+                    "total_msgs": task['total_msgs'],
+                    "restored_count": task.get('current', 0),
+                })
+            except Exception as e:
+                logger.error(f"Не удалось возобновить задачу {task.get('tid')}: {e}")
 
     async def _resolve_arg(self, arg):  # все виды (ну почти) ссылок как дадут id и прочее, 
                                         # работает если копировать сообщение в топике и в аргумент типа куда отправлять вставить.
@@ -219,7 +297,7 @@ class ChatCopy(loader.Module):
             except: pass
         return entity, extra
 
-    def _get_normalized_id(self, entity): #что бы получать норм айди а не нечто, что бы копировка шла хорошо.
+    def _get_normalized_id(self, entity): # что бы получать норм айди а не нечто, что бы копировка шла хорошо.
         if not entity:
             return "0"
         try:
@@ -234,7 +312,7 @@ class ChatCopy(loader.Module):
                 return eid
             return "0"
 
-    def _is_forum(self, entity): #да, не спрашивайте.
+    def _is_forum(self, entity): # да, не спрашивайте.
         if not isinstance(entity, Channel):
             return False
         if hasattr(entity, 'forum') and entity.forum:
@@ -313,7 +391,7 @@ class ChatCopy(loader.Module):
         self.topic_info_cache[cache_key] = info
         return info
 
-    async def _create_topic(self, dest_entity, title, src_topic_id=None, icon_emoji_id=None, icon_color=None): #создает топик 
+    async def _create_topic(self, dest_entity, title, src_topic_id=None, icon_emoji_id=None, icon_color=None): # создает топик 
         if not isinstance(dest_entity, Channel) or not self._is_forum(dest_entity):
             return None
         try:
@@ -417,6 +495,15 @@ class ChatCopy(loader.Module):
             await asyncio.sleep(5)
         return None
 
+    async def on_unload(self):
+        """Остановка всех задач при выгрузке модуля"""
+        for task in self._tasks:
+            if not task.done(): task.cancel()
+        for tid in list(self.active_dumps.keys()):
+            self.active_dumps[tid]["status"] = "stopped"
+            if "cancel" in self.active_dumps[tid]: self.active_dumps[tid]["cancel"].set()
+        for t in self.watcher_flush_tasks.values(): t.cancel()
+
     def _should_include_message(self, msg, filter_type): # handler типов сообщений. медиа, документ и прочее.
         if filter_type == FILTER_ALL:
             return True
@@ -461,10 +548,10 @@ class ChatCopy(loader.Module):
     task_id, total_msgs=0, speed=0): # ниже этой функции, функция обработки флудвейта, он просто отправляет примерное время когда продолжит работать.
         minutes = seconds // 60
         secs = seconds % 60
-        resume_time = (datetime.now() + timedelta(seconds=seconds + self.config["flood_buffer"])).strftime("%H:%M:%S")
+        resume_time = (datetime.now(MSK) + timedelta(seconds=seconds + self.config["flood_buffer"])).strftime("%H:%M:%S")
         remaining = max(0, total_msgs - count)
         self.last_flood_info = {
-            "time": datetime.now().strftime("%H:%M:%S"),
+            "time": datetime.now(MSK).strftime("%H:%M:%S"),
             "duration": seconds,
             "task": task_id,
             "resume_at": resume_time
@@ -497,7 +584,7 @@ class ChatCopy(loader.Module):
             time_str = f"{minutes}m"
         return f"\n⏱ <b>{floods} FloodWait (~{time_str})</b>"
 
-    def _format_duration(self, seconds): #описание ниже
+    def _format_duration(self, seconds): # описание ниже
         """Форматирует длительность в читаемый вид"""
         if seconds < 60:
             return f"{int(seconds)}с"
@@ -570,7 +657,7 @@ class ChatCopy(loader.Module):
             await asyncio.sleep(delay)
         return total_sent
 
-    async def worker(self): #воркер для Watcher'а
+    async def worker(self): # воркер для Watcher'а
         while True:
             item = await self.queue.get()
             try:
@@ -602,7 +689,7 @@ class ChatCopy(loader.Module):
                     idx = next((i for i, t in enumerate(self.task_queue) if t['tid'] == tid), None)
                     if idx is not None:
                         self.task_queue[idx]['status'] = 'running'
-                        self.task_queue[idx]['start_time'] = datetime.now()
+                        self.task_queue[idx]['start_time'] = datetime.now(MSK)
                         self.current_task_index = idx
                 if tid:
                     self.active_dumps[tid] = {
@@ -626,6 +713,10 @@ class ChatCopy(loader.Module):
                     self.active_dumps[tid]["cancel"].set()
                 update_task = asyncio.create_task(self._auto_update_status(tid, task_data.get('status_msg')))
                 try:
+                    logger.info("[%s] Задача запущена: %s → %s | Всего: %d сообщений",
+                               tid, task_data.get('src_name', '?'),
+                               getattr(task_data.get('dest'), 'title', '?'),
+                               task_data.get('total_msgs', 0))
                     await self._history_dumper(**task_data)
                 except Exception as e:
                     logger.error(f"Dump Worker Error: {e}")
@@ -636,9 +727,22 @@ class ChatCopy(loader.Module):
                     if tid in self.active_dumps:
                         completed_task = self.active_dumps[tid].copy()
                         completed_task['tid'] = tid
-                        completed_task['end_time'] = datetime.now()
+                        completed_task['end_time'] = datetime.now(MSK)
                         self.task_history.append(completed_task)
                         self.task_queue = [t for t in self.task_queue if t['tid'] != tid]
+                        duration = time.time() - completed_task.get('start_time', time.time())
+                        active_duration = duration - completed_task.get('flood_total_seconds', 0)
+                        if active_duration <= 0: active_duration = 1
+                        avg_spd = (completed_task.get('current', 0) / active_duration) * 60
+                        self.task_stats[tid] = {
+                            'completed_at': time.time() if completed_task.get('status') == 'completed' else None,
+                            'flood_count': completed_task.get('flood_count', 0),
+                            'flood_time': completed_task.get('flood_total_seconds', 0),
+                            'avg_speed': avg_spd
+                        }
+                        self.db.set("ChatCopy", "task_stats", self.task_stats)
+                    logger.info("[%s] Задача завершена. Переслано: %d",
+                               tid, self.active_dumps.get(tid, {}).get('current', 0))
                     self.current_dump_task = None
                     self.is_processing_queue = False
                     self.dump_queue.task_done()
@@ -648,17 +752,16 @@ class ChatCopy(loader.Module):
                             final_wait = min(60 * last_task['flood_count'], 300)
                             logger.info(f"Финальная задержка после задачи с FloodWait'ами: {final_wait}с")
                             await asyncio.sleep(final_wait)
+                            self._save_tasks()
 
-    def _update_queue_positions(self): #описание ниже
+    def _update_queue_positions(self): # описание ниже
         """Обновляет позиции задач в очереди"""
         queued_tasks = [t for t in self.task_queue if t['status'] == 'queued']
         for i, task in enumerate(queued_tasks, 1):
             task['position'] = i
 
-    async def _auto_update_status(self, tid, status_msg): #описание ниже
-        """Автоматическое обновление статуса каждые 5 секунд с обновлением сообщения"""
-        last_msg_update = 0
-        update_interval = 10
+    async def _auto_update_status(self, tid, status_msg): # описание ниже
+        """Обновляет только внутренний кэш скорости без редактирования сообщения"""
         while True:
             try:
                 await asyncio.sleep(5)
@@ -672,13 +775,21 @@ class ChatCopy(loader.Module):
                 total = task.get('total_estimated', 0)
                 start_time = task.get('start_time', time.time())
                 elapsed = time.time() - start_time
-                if elapsed > 0 and status == 'running': #расчет скорости
-                    speed = (current / elapsed) * 60
-                    task['current_speed'] = speed
-                    task['speed_samples'].append(speed)
-                    if len(task['speed_samples']) > 20:
-                        task['speed_samples'].pop(0)
+                now = time.time()
+                last_calc_time = task.get('_last_calc_time', now - 5)
+                last_calc_count = task.get('_last_calc_count', current)
+                delta_t = now - last_calc_time
+                delta_c = current - last_calc_count
+                if status == 'running':
+                    if delta_t > 0:
+                        inst_speed = (delta_c / delta_t) * 60
+                        task['speed_samples'].append(inst_speed)
+                        if len(task['speed_samples']) > 12:
+                            task['speed_samples'].pop(0)
+                    task['_last_calc_time'] = now
+                    task['_last_calc_count'] = current
                 avg_speed = sum(task['speed_samples']) / len(task['speed_samples']) if task['speed_samples'] else 0
+                task['current_speed'] = avg_speed
                 if avg_speed > 0:
                     self.global_speed_history.append(avg_speed)
                     if len(self.global_speed_history) > 50:
@@ -691,37 +802,19 @@ class ChatCopy(loader.Module):
                     'elapsed': elapsed,
                     'status': status
                 }
-                now = time.time() #обновление самого сообщения с статусом (.ccpanel)
-                if status_msg and (now - last_msg_update) >= update_interval:
-                    try:
-                        progress = round((current / total * 100), 1) if total > 0 else 0
-                        eta = self._calculate_eta(current, total, avg_speed)
-                        elapsed_str = self._format_duration(elapsed)
-                        update_text = (
-                            f"⚡ <b>Прогресс:</b> {current}/{total} ({progress}%)\n"
-                            f"🚀 <b>Скорость:</b> {round(avg_speed, 1)} сообщений/мин\n"
-                            f"⏱ <b>Прошло:</b> {elapsed_str} | <b>Осталось:</b> {eta}"
-                        )
-                        if status == 'paused':
-                            flood_wait = task.get('flood_wait_until', 0)
-                            resume_time = datetime.fromtimestamp(flood_wait).strftime("%H:%M:%S") if flood_wait else "неизвестно"
-                            update_text = f"⏸ <b>Пауза (FloodWait)</b>\n{update_text}\n🔄 <b>Продолжение:</b> {resume_time}"
-                        await status_msg.edit(update_text)
-                        last_msg_update = now
-                    except Exception as e:
-                        logger.debug(f"Не удалось обновить сообщение статуса: {e}")
+                # прогресс идёт в логи через logger.info
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Auto update error: {e}")
 
-    def _get_avg_speed(self): #описание ниже
+    def _get_avg_speed(self): # описание ниже
         """Получает среднюю скорость из глобальной истории"""
         if not self.global_speed_history:
             return 100
         return sum(self.global_speed_history) / len(self.global_speed_history)
 
-    def _calculate_eta(self, current, total, speed_per_min): #описание ниже
+    def _calculate_eta(self, current, total, speed_per_min): # описание ниже
         """Расчёт оставшегося времени"""
         if speed_per_min <= 0 or total <= 0:
             return "∞"
@@ -729,7 +822,7 @@ class ChatCopy(loader.Module):
         minutes = remaining / speed_per_min
         return self._format_duration(minutes * 60)
 
-    def _calculate_task_wait_time(self, target_position): #описание ниже
+    def _calculate_task_wait_time(self, target_position): # описание ниже
         """Расчёт времени ожидания для задачи в очереди"""
         avg_speed = self._get_avg_speed()
         total_seconds = 0
@@ -741,7 +834,7 @@ class ChatCopy(loader.Module):
                     total_seconds += task_seconds
         return self._format_duration(total_seconds)
 
-    def _estimate_duration(self, total_msgs): #описание ниже
+    def _estimate_duration(self, total_msgs): # описание ниже
         """Оценка длительности задачи"""
         avg_speed = self._get_avg_speed()
         if avg_speed <= 0 or total_msgs <= 0:
@@ -749,7 +842,7 @@ class ChatCopy(loader.Module):
         minutes = total_msgs / avg_speed
         return self._format_duration(minutes * 60)
 
-    def _calculate_end_time(self, start_time, total_msgs, speed_per_min=None): #описание ниже
+    def _calculate_end_time(self, start_time, total_msgs, speed_per_min=None): # описание ниже
         """Расчёт времени окончания задачи"""
         if speed_per_min is None:
             speed_per_min = self._get_avg_speed()
@@ -759,7 +852,7 @@ class ChatCopy(loader.Module):
         end_time = start_time + timedelta(minutes=minutes)
         return end_time.strftime("%H:%M:%S")
 
-    async def _raw_sender(self, messages, dest_id, no_author, no_captions, topic_id, status_msg=None, tid=None): #описание ниже
+    async def _raw_sender(self, messages, dest_id, no_author, no_captions, topic_id, status_msg=None, tid=None): # описание ниже
         """Улучшенный sender с умной обработкой FloodWait"""
         try:
             dest_peer = await self.client.get_input_entity(dest_id)
@@ -780,6 +873,7 @@ class ChatCopy(loader.Module):
                 task["consecutive_floods"] = task.get("consecutive_floods", 0) + 1
                 task["flood_count"] = task.get("flood_count", 0) + 1
                 task["flood_total_seconds"] = task.get("flood_total_seconds", 0) + wait_time
+                task["current_flood_wait"] = wait_time
                 task["status"] = "paused"
                 task["flood_wait_until"] = time.time() + wait_time + self.config["flood_buffer"]
                 current_speed = task.get('current_speed', 0)
@@ -821,7 +915,7 @@ class ChatCopy(loader.Module):
             logger.error(f"[{tid}] Send Error: {e}")
             return False
 
-    def _parse_filter(self, args): #все аргументы нужные цепляет
+    def _parse_filter(self, args): # все аргументы нужные цепляет
         filter_type = FILTER_ALL
         args_list = list(args)
         for arg in args_list:
@@ -839,22 +933,32 @@ class ChatCopy(loader.Module):
                 if arg in args: args.remove(arg)
         return filter_type, args
 
-    def _get_filter_name(self, filter_type): # возвращает читаемое название фильтра для отображения в интерфейсе.
+    def _get_filter_name(self, filter_type):
         names = {
             FILTER_ALL: "Все сообщения",
             FILTER_MEDIA: "Только медиа",
             FILTER_PHOTO_VIDEO: "Фото и видео",
             FILTER_DOCS: "Документы",
-            FILTER_TEXT: "Текст"
+            FILTER_TEXT: "Текст",
         }
         return names.get(filter_type, "Неизвестно")
 
+    def _get_effective_batch_size(self) -> int:
+        """Returns the current batch_size from config, always fresh."""
+        val = self.config.get("batch_size", 100)
+        if isinstance(val, int) and 1 <= val <= 100:
+            return val
+        return 100
+
     @loader.command()
     async def chatcopy(self, message: Message):
-        """<src> <dest>[start_id:final_id] [-n] [-dmc] [--media|--photo_video|--docs|--text] — Добавить задачу в очередь"""
+        """<src> <dest> [start_id:final_id] [-n] [-dmc] [--now] [--media|--photo_video|--docs|--text] — Добавить задачу в очередь. --now: начать сразу, без полного подсчёта."""
         args_raw = utils.get_args_raw(message).split()
         no_author = "-n" in args_raw
         no_captions = "-dmc" in args_raw
+        start_now = "--now" in args_raw
+        if start_now:
+            args_raw.remove("--now")
         filter_type, args_raw = self._parse_filter(args_raw)
         clean_args = [x for x in args_raw if x not in ["-n", "-dmc"]]
         if len(clean_args) < 2:
@@ -882,114 +986,113 @@ class ChatCopy(loader.Module):
         if src_is_forum and not dest_is_forum:
             forum_result = await self._ensure_forum_enabled(dest)
             if forum_result:
-                await utils.answer(message, self.strings["forum_enabled"].format(
-                    chat=utils.escape_html(getattr(dest, 'title', dest.id))
-                ))
                 dest = await self.client.get_entity(dest.id)
+                dest_is_forum = self._is_forum(dest)
+                if not dest_is_forum:
+                    await asyncio.sleep(2)
+                    dest = await self.client.get_entity(dest.id)
+                    dest_is_forum = self._is_forum(dest)
+                if dest_is_forum:
+                    logger.info("[%s] Режим топиков включён на dest %s", tid, getattr(dest, 'title', dest.id))
+                else:
+                    logger.warning("[%s] _ensure_forum_enabled вернул True, но _is_forum всё ещё False для dest %s", tid, getattr(dest, 'title', dest.id))
             else:
-                return await utils.answer(message, self.strings["forum_enable_failed"].format(
-                    chat=utils.escape_html(getattr(dest, 'title', dest.id))
-                ))
+                logger.warning("[%s] Не удалось включить топики на dest %s — копирование пойдёт без маппинга топиков", tid, getattr(dest, 'title', dest.id))
+        elif src_is_forum and dest_is_forum:
+            try:
+                dest = await self.client.get_entity(dest.id)
+                dest_is_forum = self._is_forum(dest)
+            except Exception:
+                pass
+        if src_is_forum and not dest_is_forum:
+            logger.warning("[%s] src — форум, dest — НЕ форум. Все сообщения пойдут в General!", tid)
         prep_key = "preparing_prem" if self.is_premium else "preparing_no_prem"
         status_msg = await utils.answer(message, self.strings[prep_key])
         total_msgs = 0
-        try:
-            async for _ in self.client.iter_messages(
-                src,
-                min_id=start_id-1 if start_id else 0,
-                max_id=final_id+1 if final_id else 0
-            ):
-                total_msgs += 1
-                if total_msgs > 150000:
-                    break
-        except:
-            pass
-            forum_result = await self._ensure_forum_enabled(dest)
-            if forum_result:
-                await utils.answer(message, self.strings["forum_enabled"].format(chat=utils.escape_html(getattr(dest, 'title', dest.id))))
-                dest = await self.client.get_entity(dest.id)
-            else:
-                return await utils.answer(message, self.strings["forum_enable_failed"].format(chat=utils.escape_html(getattr(dest, 'title', dest.id))))
+        f_src_t_for_count = src_map.get('topic')
+        if start_now:
+            try:
+                if f_src_t_for_count:
+                    async for _ in self.client.iter_messages(
+                        src,
+                        reply_to=f_src_t_for_count,
+                        min_id=start_id - 1 if start_id else 0,
+                        max_id=final_id + 1 if final_id else 0,
+                    ):
+                        total_msgs += 1
+                        if total_msgs > 150000: break
+                else:
+                    result = await self.client(functions.messages.GetHistoryRequest(
+                        peer=src,
+                        offset_id=0,
+                        offset_date=None,
+                        add_offset=0,
+                        limit=1,
+                        max_id=final_id + 1 if final_id else 0,
+                        min_id=start_id - 1 if start_id else 0,
+                        hash=0,
+                    ))
+                    total_msgs = getattr(result, 'count', 0) or 0
+            except Exception as e:
+                logger.warning(f"Count failed for --now: {e}")
+                total_msgs = 0
+        else:
+            try:
+                iter_kwargs = {
+                    "min_id": start_id - 1 if start_id else 0,
+                    "max_id": final_id + 1 if final_id else 0,
+                }
+                if f_src_t_for_count:
+                    iter_kwargs["reply_to"] = f_src_t_for_count
+                async for _ in self.client.iter_messages(src, **iter_kwargs):
+                    total_msgs += 1
+                    if total_msgs > 150000: break
+            except Exception as e:
+                logger.error(f"Ошибка при подсчете сообщений: {e}")
+                total_msgs = -1
         src_name = getattr(src, 'title', src.id)
         dest_name = getattr(dest, 'title', dest.id)
         async with self._queue_lock:
             queue_position = len([t for t in self.task_queue if t['status'] == 'queued']) + 1
-            wait_time = self._calculate_task_wait_time(queue_position)
             estimated_duration = self._estimate_duration(total_msgs)
-            now = datetime.now()
-            start_delta = self._parse_duration(wait_time)
-            estimated_delta = self._parse_duration(estimated_duration)
-            start_time = (now + timedelta(seconds=start_delta)).strftime("%H:%M:%S")
-            end_time = (now + timedelta(seconds=start_delta) + timedelta(seconds=estimated_delta)).strftime("%H:%M:%S")
+            mode_str = "🗂️ Топики (Auto)" if src_is_forum else "Обычный"
+            no_auth_str = "Да" if no_author else "Нет"
+            no_capt_str = "Да" if no_captions else "Нет"
+            start_id_str = f"с {start_id}" if start_id > 0 else "С начала"
+            if final_id > 0: start_id_str += f" до {final_id}"
             task_info = {
-                'tid': tid,
-                'src': src_name,
-                'dest': dest_name,
-                'src_id': src.id,
-                'dest_id': dest.id,
-                'status': 'queued',
-                'position': queue_position,
-                'added_time': datetime.now(),
-                'no_author': no_author,
-                'no_captions': no_captions,
-                'filter_type': filter_type,
-                'start_id': start_id,
-                'final_id': final_id,
-                'total_msgs': total_msgs,
-                'current': 0,
-                'estimated_start': start_time,
-                'estimated_end': end_time,
-                'estimated_duration': estimated_duration,
+                'tid': tid, 'src': src_name, 'dest': dest_name, 'src_id': src.id, 'dest_id': dest.id,
+                'status': 'queued', 'position': queue_position, 'added_time': datetime.now(MSK).isoformat(),
+                'no_author': no_author, 'no_captions': no_captions, 'filter_type': filter_type,
+                'start_id': start_id, 'final_id': final_id, 'total_msgs': total_msgs if total_msgs > -1 else 0,
+                'current': 0, 'last_processed_id': start_id,
+                'status_msg_id': status_msg.id, 'status_chat_id': status_msg.chat_id,
+                'map_t': src_is_forum, 'f_src_t': src_map.get('topic'), 'f_dest_t': dest_map.get('topic'),
+                'start_now': start_now,
             }
             self.task_queue.append(task_info)
-        mode_str = "Обычный" if not src_is_forum else "🗂️ Топики (Auto)"
-        no_auth_str = "Да" if no_author else "Нет"
-        no_capt_str = "Да" if no_captions else "Нет"
-        start_id_str = "С начала"
-        if start_id > 0 and final_id > 0:
-            start_id_str = f"с {start_id} до {final_id}"
-        elif start_id > 0:
-            start_id_str = f"с {start_id}"
-        elif final_id > 0:
-            start_id_str = f"до {final_id}"
+            self._save_tasks()
         filter_name = self._get_filter_name(filter_type)
         start_string_key = "copy_start_prem" if self.is_premium else "copy_start_no_prem"
-        status_msg = await utils.answer(message, self.strings[start_string_key].format(
-            src=utils.escape_html(src_name), 
-            dest=utils.escape_html(dest_name),
-            mode=mode_str, 
-            start_id=start_id_str, 
-            no_auth=no_auth_str,
-            no_capt=no_capt_str, 
-            filter_type=filter_name,
-            total_msgs=total_msgs,
-            estimated_time=estimated_duration,
-            position=queue_position
+        await status_msg.edit(self.strings[start_string_key].format(
+            src=utils.escape_html(src_name), dest=utils.escape_html(dest_name),
+            mode=mode_str, start_id=start_id_str, no_auth=no_auth_str,
+            no_capt=no_capt_str, filter_type=filter_name,
+            total_msgs=total_msgs if total_msgs > -1 else "∞ (ошибка подсчета)",
+            estimated_time=estimated_duration, position=queue_position
         ))
         await self.dump_queue.put({
-            "status_msg": status_msg, 
-            "src": src, 
-            "dest": dest, 
-            "no_auth": no_author, 
-            "no_captions": no_captions,
-            "map_t": src_is_forum, 
-            "f_src_t": src_map.get('topic'), 
-            "f_dest_t": dest_map.get('topic'), 
-            "tid": tid, 
-            "min_id": start_id, 
-            "max_id": final_id,
-            "mode_str": mode_str, 
-            "no_auth_str": no_auth_str, 
-            "no_capt_str": no_capt_str, 
-            "start_id_str": start_id_str,
-            "filter_type": filter_type, 
-            "filter_name": filter_name, 
-            "src_name": src_name,
-            "queue_position": queue_position,
-            "total_msgs": total_msgs
+            "status_msg": status_msg, "src": src, "dest": dest,
+            "no_auth": no_author, "no_captions": no_captions,
+            "map_t": src_is_forum, "f_src_t": src_map.get('topic'), "f_dest_t": dest_map.get('topic'),
+            "tid": tid, "min_id": start_id, "max_id": final_id,
+            "mode_str": mode_str, "no_auth_str": no_auth_str, "no_capt_str": no_capt_str,
+            "start_id_str": start_id_str, "filter_type": filter_name, "filter_name": filter_name,
+            "src_name": src_name, "queue_position": queue_position, "total_msgs": total_msgs if total_msgs > -1 else 0,
+            "restored_count": 0,
         })
 
-    def _parse_duration(self, duration_str): #описание ниже
+    def _parse_duration(self, duration_str): # описание ниже
         """Парсит строку длительности в секунды"""
         if duration_str == "∞":
             return 3600
@@ -1014,9 +1117,9 @@ class ChatCopy(loader.Module):
                 total += int(part)
         return total if total > 0 else 0
 
-    @loader.command() #стартует слежку за чатом что бы пи... кхм кхм, благополучно заимствовать сей прекрасный или не очень контент
+    @loader.command() # стартует слежку за чатом что бы пи... кхм кхм, благополучно заимствовать сей прекрасный или не очень контент
     async def ccwatch(self, message: Message):
-        """<src> <dest> [start_id:final_id][-n] [-dmc][--media|--photo_video|--docs|--text] — Наблюдение за чатом"""
+        """<src> <dest> [start_id:final_id] [-n] [-dmc][--media|--photo_video|--docs|--text] — Наблюдение за чатом"""
         args = utils.get_args_raw(message).split()
         no_author = "-n" in args
         no_captions = "-dmc" in args
@@ -1056,7 +1159,7 @@ class ChatCopy(loader.Module):
         except Exception:
             pass
         if is_restricted:
-            return await utils.answer(message, "❌ Ошибка: канал в режиме запрета копирования") #ну как бы, учитываем да
+            return await utils.answer(message, "❌ Ошибка: канал в режиме запрета копирования") # ну как бы, учитываем да
         src_t = src_map.get('topic')
         dest_t = dest_map.get('topic')
         map_topics = src_is_forum
@@ -1091,103 +1194,129 @@ class ChatCopy(loader.Module):
 
     async def _history_dumper(self, status_msg, src, dest, no_auth, no_captions, 
                                 map_t, f_src_t, f_dest_t, tid, min_id=0, max_id=0,
-                                filter_type=FILTER_ALL, filter_name="", **kwargs): #а чо тут не понятного
+                                filter_type=FILTER_ALL, filter_name="", restored_count=0, **kwargs):
         if tid in self.active_dumps:
             self.active_dumps[tid]["status"] = "running"
-        count = 0
+        task = next((t for t in self.task_queue if t['tid'] == tid), None)
+        if not task:
+            logger.error(f"Задача {tid} не найдена в очереди для дампа.")
+            return
+        count = task.get('current', 0) or restored_count
+        if tid in self.active_dumps and count > 0:
+            self.active_dumps[tid]["current"] = count
+        start_from_id = task.get('last_processed_id', min_id)
+        if map_t:
+            try:
+                dest = await self.client.get_entity(dest.id)
+                if not self._is_forum(dest):
+                    logger.info("[%s] dest не форум, пытаемся включить топики...", tid)
+                    ok = await self._ensure_forum_enabled(dest)
+                    if ok:
+                        await asyncio.sleep(2)
+                        dest = await self.client.get_entity(dest.id)
+                        if self._is_forum(dest):
+                            logger.info("[%s] Режим топиков включён на dest в dumper", tid)
+                        else:
+                            logger.warning("[%s] _ensure_forum_enabled OK, но _is_forum False. Пробуем ещё раз...", tid)
+                            await asyncio.sleep(3)
+                            dest = await self.client.get_entity(dest.id)
+                            if not self._is_forum(dest):
+                                logger.warning("[%s] dest не является форумом после повторной проверки, пересылка без топиков", tid)
+                                map_t = False
+                    else:
+                        logger.warning("[%s] dest не является форумом, пересылка без топиков", tid)
+                        map_t = False
+            except Exception as e:
+                logger.warning("[%s] Ошибка обновления dest entity: %s", tid, e)
+        if map_t:
+            try:
+                src = await self.client.get_entity(src.id)
+                if not self._is_forum(src):
+                    logger.warning("[%s] src не является форумом (хотя map_t=True), отключаем маппинг", tid)
+                    map_t = False
+            except Exception as e:
+                logger.warning("[%s] Ошибка обновления src entity: %s", tid, e)
         batch = []
         dumper_kwargs = {"reverse": True}
-        if f_src_t: 
-            dumper_kwargs["reply_to"] = f_src_t
-        if min_id and min_id > 0: 
-            dumper_kwargs["min_id"] = min_id - 1
-        if max_id and max_id > 0: 
-            dumper_kwargs["max_id"] = max_id + 1
-        batch_size = self.config["batch_size"]
-        if not isinstance(batch_size, int): 
-            batch_size = 100
+        if f_src_t: dumper_kwargs["reply_to"] = f_src_t
+        if start_from_id > 0: dumper_kwargs["min_id"] = start_from_id - 1
+        if max_id > 0: dumper_kwargs["max_id"] = max_id + 1
         delay = self.config["delay"]
-        if not isinstance(delay, int):
-            delay = 10
         try:
             async for msg in self.client.iter_messages(src, **dumper_kwargs):
-                if tid not in self.active_dumps or self.active_dumps[tid].get("status") == "stopped":
-                    break
-                cancel_event = self.active_dumps[tid].get("cancel")
-                if cancel_event:
-                    await cancel_event.wait()
-                if tid not in self.active_dumps or self.active_dumps[tid].get("status") == "stopped":
-                    break
-                if isinstance(msg, types.MessageService): 
-                    continue
-                if not self._should_include_message(msg, filter_type):
-                    continue
+                if tid not in self.active_dumps or self.active_dumps[tid].get("status") == "stopped": break
+                await self.active_dumps[tid].get("cancel", asyncio.Event()).wait()
+                if tid not in self.active_dumps or self.active_dumps[tid].get("status") == "stopped": break
+                if isinstance(msg, types.MessageService) or not self._should_include_message(msg, filter_type): continue
                 batch.append(msg)
-                if len(batch) >= batch_size:
+                if len(batch) >= self._get_effective_batch_size():
                     processed = await self._process_batch(
-                        messages=list(batch), dest_id=dest.id, no_author=no_auth, 
-                        no_captions=no_captions, fixed_dest_topic=f_dest_t, 
-                        map_topics=map_t, dest_entity=dest, src_entity=src,
+                        messages=list(batch), dest_id=dest.id, no_author=no_auth, no_captions=no_captions,
+                        fixed_dest_topic=f_dest_t, map_topics=map_t, dest_entity=dest, src_entity=src,
                         filter_type=filter_type, status_msg=status_msg, tid=tid
                     )
-                    if tid not in self.active_dumps or self.active_dumps[tid].get("status") == "stopped":
-                        break
+                    if tid not in self.active_dumps or self.active_dumps[tid].get("status") == "stopped": break
                     if tid in self.active_dumps:
                         self.active_dumps[tid]["current"] += processed
                         count = self.active_dumps[tid]["current"]
+                        task['current'] = count
+                        task['last_processed_id'] = batch[-1].id
+                        self._save_tasks()
+                        total = task.get('total_msgs', 0)
+                        pct = round(count / total * 100, 1) if total else 0
+                        spd = round(self.active_dumps[tid].get('current_speed', 0), 1)
+                        logger.info("[%s] Прогресс: %d/%d (%.1f%%) | %.1f сооб/мин",
+                                   tid, count, total, pct, spd)
                     batch = []
-                    await asyncio.sleep(delay)
-            if batch and tid in self.active_dumps:
-                cancel_event = self.active_dumps[tid].get("cancel")
-                if cancel_event:
-                    await cancel_event.wait()
-                if tid in self.active_dumps and self.active_dumps[tid].get("status") != "stopped":
-                    processed = await self._process_batch(
-                        messages=list(batch), dest_id=dest.id, no_author=no_auth,
-                        no_captions=no_captions, fixed_dest_topic=f_dest_t,
-                        map_topics=map_t, dest_entity=dest, src_entity=src,
-                        filter_type=filter_type, status_msg=status_msg, tid=tid
-                    )
-                    if tid in self.active_dumps:
-                        self.active_dumps[tid]["current"] += processed
-                        count = self.active_dumps[tid]["current"]
-            if tid in self.active_dumps:
+            if batch and self.active_dumps.get(tid, {}).get("status") != "stopped":
+                processed = await self._process_batch(
+                    messages=list(batch), dest_id=dest.id, no_author=no_auth, no_captions=no_captions,
+                    fixed_dest_topic=f_dest_t, map_topics=map_t, dest_entity=dest, src_entity=src,
+                    filter_type=filter_type, status_msg=status_msg, tid=tid
+                )
+                if tid in self.active_dumps:
+                    self.active_dumps[tid]["current"] += processed
+                    count = self.active_dumps[tid]["current"]
+                    task['current'] = count
+                    task['last_processed_id'] = batch[-1].id
+            if self.active_dumps.get(tid, {}).get("status") != "stopped":
+                task['status'] = 'completed'
+                self.task_queue = [t for t in self.task_queue if t['tid'] != tid]
+                self._save_tasks()
                 task_data = self.active_dumps[tid]
-                start_ts = task_data.get('start_time', time.time())
-                duration_seconds = time.time() - start_ts
+                duration_seconds = time.time() - task_data.get('start_time', time.time())
                 duration_str = self._format_duration(duration_seconds)
-                avg_speed = 0
-                if duration_seconds > 0:
-                    avg_speed = round((count / duration_seconds) * 60, 1)
-                flood_info = self._format_flood_stats(task_data)
+                active_seconds = duration_seconds - task_data.get('flood_total_seconds', 0)
+                if active_seconds <= 0: active_seconds = 1
+                avg_speed = round((count / active_seconds) * 60, 1)
+                chat_id_to_report = status_msg.chat_id if status_msg and status_msg.chat_id else task.get('status_chat_id')
                 done_string_key = "copy_done_detailed_prem" if self.is_premium else "copy_done_detailed_no_prem"
-                await self.client.send_message(status_msg.chat_id, self.strings[done_string_key].format(
-                    src=utils.escape_html(getattr(src, 'title', src.id)),
-                    dest=utils.escape_html(getattr(dest, 'title', dest.id)),
-                    no_auth=kwargs.get("no_auth_str", "N/A"),
-                    no_capt=kwargs.get("no_capt_str", "N/A"),
-                    start_id=kwargs.get("start_id_str", "N/A"),
-                    mode=kwargs.get("mode_str", "N/A"),
-                    filter_type=filter_name,
-                    count=count,
-                    duration=duration_str,
-                    avg_speed=avg_speed,
-                    flood_info=flood_info
-                ))
-                self.task_stats[tid] = {
-                    "completed_at": datetime.now().isoformat(),
-                    "count": count,
-                    "flood_count": task_data.get("flood_count", 0),
-                    "flood_time": task_data.get("flood_total_seconds", 0),
-                    "avg_speed": avg_speed,
-                    "duration": duration_seconds
-                }
-                self.db.set("ChatCopy", "task_stats", self.task_stats)
+                done_full = self.strings[done_string_key].format(
+                    src=utils.escape_html(getattr(src, 'title', src.id)), dest=utils.escape_html(getattr(dest, 'title', dest.id)),
+                    no_auth=kwargs.get("no_auth_str", "N/A"), no_capt=kwargs.get("no_capt_str", "N/A"),
+                    start_id=kwargs.get("start_id_str", "N/A"), mode=kwargs.get("mode_str", "N/A"),
+                    filter_type=filter_name, count=count, duration=duration_str,
+                    avg_speed=avg_speed, flood_info=self._format_flood_stats(task_data)
+                )
+                # краткий итог в логи
+                logger.info(
+                    "[✅ %s] Завершено: %d сообщений за %s | %.1f сооб/мин",
+                    task_data.get('name', '?'), count, duration_str, avg_speed
+                )
+                # полный итог в чат где было запущено
+                if chat_id_to_report:
+                    await self.client.send_message(chat_id_to_report, done_full)
+        except Exception as e:
+            logger.error(f"Dumper Error: {e}", exc_info=True)
+            chat_id_to_report = status_msg.chat_id if status_msg and status_msg.chat_id else task.get('status_chat_id')
+            if chat_id_to_report: await self.client.send_message(chat_id_to_report, f"❌ Ошибка в задаче:\n{e}")
+            task['status'] = 'error'
+            self._save_tasks()
         except Exception as e:
             logger.error(f"Dumper Error: {e}")
             await self.client.send_message(status_msg.chat_id, f"❌ Ошибка в задаче:\n{e}")
 
-    @loader.watcher() #сам ватчер, который следит за чатами
+    @loader.watcher() # сам ватчер, который следит за чатами
     async def watcher(self, message: Message):
         if isinstance(message, types.MessageService): 
             return
@@ -1238,7 +1367,7 @@ class ChatCopy(loader.Module):
         self.watcher_buffer[cid].append(message)
         self.last_watched[cid] = {
             "name": getattr(getattr(message, 'chat', None), "title", cid) if getattr(message, 'chat', None) else cid, 
-            "time": datetime.now().strftime("%H:%M:%S")
+            "time": datetime.now(MSK).strftime("%H:%M:%S")
         }
         if cid in self.watcher_flush_tasks:
             self.watcher_flush_tasks[cid].cancel()
@@ -1260,6 +1389,11 @@ class ChatCopy(loader.Module):
         self.watcher_buffer[cid] = []
         if cid in self.watcher_flush_tasks:
             del self.watcher_flush_tasks[cid]
+        try:
+            cid_int = int(cid)
+        except (ValueError, TypeError):
+            logger.error(f"Watcher flush: неверный cid={cid}")
+            return
         albums = {}
         single_msgs = []
         for msg in msgs:
@@ -1273,7 +1407,7 @@ class ChatCopy(loader.Module):
             sorted_album = sorted(album_msgs, key=lambda x: x.id)
             try:
                 dest_entity = await self.client.get_entity(cfg["dest"])
-                src_entity = await self.client.get_entity(int(cid)) if cid.lstrip("-").isdigit() else await self.client.get_entity(cid)
+                src_entity = await self.client.get_entity(cid_int)
                 await self.queue.put({
                     "messages": sorted_album, 
                     "dest_id": cfg["dest"], 
@@ -1287,7 +1421,7 @@ class ChatCopy(loader.Module):
                     "watch_cid": cid
                 })
             except Exception as e:
-                logger.error(f"Watcher album flush error: {e}")
+                logger.error(f"Watcher album flush error (cid={cid}): {e}")
         batch_size = self.config["batch_size"]
         if not isinstance(batch_size, int):
             batch_size = 100
@@ -1295,7 +1429,7 @@ class ChatCopy(loader.Module):
             batch = single_msgs[i:i + batch_size]
             try:
                 dest_entity = await self.client.get_entity(cfg["dest"])
-                src_entity = await self.client.get_entity(int(cid)) if cid.lstrip("-").isdigit() else await self.client.get_entity(cid)
+                src_entity = await self.client.get_entity(cid_int)
                 await self.queue.put({
                     "messages": batch, 
                     "dest_id": cfg["dest"], 
@@ -1309,9 +1443,9 @@ class ChatCopy(loader.Module):
                     "watch_cid": cid
                 })
             except Exception as e:
-                logger.error(f"Watcher batch flush error: {e}")
+                logger.error(f"Watcher batch flush error (cid={cid}): {e}")
 
-    async def _catch_up_on_restart(self): #по моему ватчер восстанавливает после перезагрузки
+    async def _catch_up_on_restart(self): # ватчер восстанавливает после перезагрузки
         await asyncio.sleep(15)
         for cid_str, cfg in self.watchlist.items():
             try:
@@ -1323,7 +1457,8 @@ class ChatCopy(loader.Module):
                 if not isinstance(batch_size, int): 
                     batch_size = 100
                 filter_type = cfg.get("filter_type", FILTER_ALL)
-                async for msg in self.client.iter_messages(int(cid_str), min_id=last_id):
+                cid_int = int(cid_str)
+                async for msg in self.client.iter_messages(cid_int, min_id=last_id):
                     if cfg.get("final_id", 0) > 0 and msg.id > cfg.get("final_id", 0):
                         continue
                     if not isinstance(msg, types.MessageService) and self._should_include_message(msg, filter_type): 
@@ -1333,7 +1468,7 @@ class ChatCopy(loader.Module):
                     for i in range(0, len(missed), batch_size):
                         batch = missed[i:i + batch_size]
                         dest_ent = await self.client.get_entity(cfg["dest"])
-                        src_ent = await self.client.get_entity(int(cid_str))
+                        src_ent = await self.client.get_entity(cid_int)
                         await self.queue.put({
                             "messages": batch, "dest_id": cfg["dest"], "no_author": cfg["no_author"],
                             "no_captions": cfg.get("no_captions", False), "fixed_dest_topic": cfg.get("fixed_dest_topic"),
@@ -1341,8 +1476,8 @@ class ChatCopy(loader.Module):
                             "filter_type": filter_type, "watch_cid": cid_str
                         })
                         await asyncio.sleep(self.config["delay"])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Catch-up error for {cid_str}: {e}")
 
     @loader.command()
     async def cchelp(self, message: Message):
@@ -1351,7 +1486,8 @@ class ChatCopy(loader.Module):
             '<emoji document_id=6030550768426159669>🛡</emoji> <b>Подробная документация по модулю ChatCopy!</b>\n\n'
             '<blockquote expandable><emoji document_id=5398049016556560225>1️⃣</emoji><b> Основные команды </b>\n'
             '<emoji document_id=5314310000531766389>🛫</emoji> <code>.chatcopy &lt;откуда&gt; &lt;куда&gt;[диапазон (от:до)] [флаги (можно несколько)]</code>\n'
-            '<i>Копирует старую историю чата (делает дамп). Ставит задачу в очередь в случае если другая была запущена.</i>\n\n'
+            '<i>Копирует старую историю чата (делает дамп). Ставит задачу в очередь в случае если другая была запущена.</i>\n'
+            '<emoji document_id=5258096772776991776>⚙️</emoji> <code>--now</code> — Начать немедленно, без полного подсчёта (примерное кол-во сообщений запрашивается у Telegram мгновенно). Идеально для 110k+ медиа.\n\n'
             '<emoji document_id=6028228780256923695>👀</emoji> <code>.ccwatch &lt;откуда&gt; &lt;куда&gt; [диапазон (от:до)] [флаги (можно несколько)]</code>\n'
             '<i>Режим слежки. Модуль будет висеть в фоне и моментально пересылать все новые сообщения. Функции [от:до] аналогичны </i><code>.chatcopy</code>\n\n'
             '<emoji document_id=5355012477883004708>📺</emoji> <code>.ccpanel</code>\n'
@@ -1388,7 +1524,8 @@ class ChatCopy(loader.Module):
             '🛡 <b>Подробная документация по модулю ChatCopy!</b>\n\n'
             '<blockquote expandable>1️⃣<b> Основные команды </b>\n'
             '🛫 <code>.chatcopy &lt;откуда&gt; &lt;куда&gt;[диапазон (от:до)] [флаги (можно несколько)]</code>\n'
-            '<i>Копирует старую историю чата (делает дамп). Ставит задачу в очередь в случае если другая была запущена.</i>\n\n'
+            '<i>Копирует старую историю чата (делает дамп). Ставит задачу в очередь в случае если другая была запущена.</i>\n'
+            '⚙️ <code>--now</code> — Начать немедленно, без полного подсчёта (примерное кол-во запрашивается у Telegram мгновенно). Идеально для 110k+ медиа.\n\n'
             '👀 <code>.ccwatch &lt;откуда&gt; &lt;куда&gt; [диапазон (от:до)] [флаги (можно несколько)]</code>\n'
             '<i>Режим слежки. Модуль будет висеть в фоне и моментально пересылать все новые сообщения. Функции [от:до] аналогичны </i><code>.chatcopy</code>\n\n'
             '📺 <code>.ccpanel</code>\n'
@@ -1428,7 +1565,7 @@ class ChatCopy(loader.Module):
         """Панель управления"""
         await self._show_main_panel(message)
 
-    async def _show_main_panel(self, message, edit=False): #вот эта хрень это основная панель которая управляет кнопками и другим стафом
+    async def _show_main_panel(self, message, edit=False): # вот эта хрень это основная панель которая управляет кнопками и другим стафом
         active_text = "Нет"
         last_flood = "—"
         if self.current_dump_task and self.current_dump_task in self.active_dumps:
@@ -1444,8 +1581,8 @@ class ChatCopy(loader.Module):
                 progress = round((count / total * 100), 1) if total > 0 else 0
                 eta = self._calculate_eta(count, total, speed)
                 elapsed_str = self._format_duration(elapsed)
-                start_time = datetime.fromtimestamp(start_ts).strftime("%H:%M:%S")
-                end_time = self._calculate_end_time(datetime.fromtimestamp(start_ts), total - count, speed)
+                start_time = datetime.fromtimestamp(start_ts, MSK).strftime("%H:%M:%S")
+                end_time = self._calculate_end_time(datetime.fromtimestamp(start_ts, MSK), total - count, speed)
                 active_text = self.strings["panel_task_running"].format(
                     name=name,
                     count=count,
@@ -1458,18 +1595,18 @@ class ChatCopy(loader.Module):
                     end_time=end_time
                 )
             elif status == 'paused':
-                flood_time = task.get('flood_total_seconds', 0)
+                current_fw = task.get('current_flood_wait', 0)
+                fw_str = f"{current_fw // 60}m {current_fw % 60}s" if current_fw >= 60 else f"{current_fw}s"
                 resume_at = task.get('flood_wait_until', 0)
-                resume_time = datetime.fromtimestamp(resume_at).strftime("%H:%M:%S") if resume_at else "неизвестно"
+                resume_time = datetime.fromtimestamp(resume_at, MSK).strftime("%H:%M:%S") if resume_at else "неизвестно"
                 active_text = self.strings["panel_task_paused"].format(
                     name=name,
-                    flood_time=f"{flood_time//60}m",
+                    flood_time=fw_str,
                     count=count,
                     total=total,
                     speed=round(task.get('current_speed', 0), 1),
                     resume_time=resume_time
                 )
-                last_flood = f"{flood_time//60}m ago"
             else:
                 active_text = f"{name}\n└ {status}"
         elif self.last_flood_info.get("time"):
@@ -1492,7 +1629,7 @@ class ChatCopy(loader.Module):
         else: 
             await self.inline.form(text=text, message=message, reply_markup=btns)
 
-    async def _panel_tasks(self, call): #описание ниже
+    async def _panel_tasks(self, call): # описание ниже
         """Панель очереди задач со списком"""
         all_tasks = []
         for i, task in enumerate(self.task_queue, 1):
@@ -1541,7 +1678,7 @@ class ChatCopy(loader.Module):
         btns.append([{"text": self.strings["btn_back"], "callback": self._cb_back}])
         await call.edit(text, reply_markup=btns)
 
-    async def _show_task_detail(self, call, tid, num): #описание ниже
+    async def _show_task_detail(self, call, tid, num): # описание ниже
         """Детальный просмотр задачи с точным расчётом времени"""
         task = next((t for t in self.task_queue if t['tid'] == tid), None)
         if not task:
@@ -1561,12 +1698,12 @@ class ChatCopy(loader.Module):
             current = active_data.get('current', 0)
             speed = active_data.get('current_speed', 0)
             start_ts = active_data.get('start_time', time.time())
-            start_time = datetime.fromtimestamp(start_ts).strftime("%H:%M:%S")
+            start_time = datetime.fromtimestamp(start_ts, MSK).strftime("%H:%M:%S")
             elapsed = time.time() - start_ts
             elapsed_str = self._format_duration(elapsed)
             progress = round((current / total * 100), 1) if total > 0 else 0
             eta_left = self._calculate_eta(current, total, speed)
-            end_time = self._calculate_end_time(datetime.fromtimestamp(start_ts), total - current, speed)
+            end_time = self._calculate_end_time(datetime.fromtimestamp(start_ts, MSK), total - current, speed)
             text = self.strings["task_detail_running"].format(
                 num=num, src=src, dest=dest, current=current, total=total,
                 progress=progress, speed=round(speed, 1), eta_left=eta_left,
@@ -1580,18 +1717,12 @@ class ChatCopy(loader.Module):
         elif status == 'queued':
             eta_start = self._calculate_task_wait_time(position)
             estimated = self._estimate_duration(total)
-            now = datetime.now()
-            start_delta = self._parse_duration(eta_start)
-            estimated_delta = self._parse_duration(estimated)
-            start_time = (now + timedelta(seconds=start_delta)).strftime("%H:%M:%S")
-            end_time = (now + timedelta(seconds=start_delta + estimated_delta)).strftime("%H:%M:%S")
             text = self.strings["task_detail_queued"].format(
                 num=num, src=src, dest=dest, total=total, eta_start=eta_start,
-                start_time=start_time, end_time=end_time, position=position, estimated_duration=estimated
+                position=position, estimated_duration=estimated
             )
-            btns = [
-                [{"text": "🗑 Удалить из очереди", "callback": self._remove_specific, "args": [tid]}],
-                [{"text": "🔙 К списку", "callback": self._panel_tasks}]
+            btns = [[{"text": "🗑 Удалить из очереди", "callback": self._remove_specific, "args": [tid]}],
+                    [{"text": "🔙 К списку", "callback": self._panel_tasks}]
             ]
         elif status == 'paused':
             active_data = self.active_dumps.get(tid, {})
@@ -1600,7 +1731,7 @@ class ChatCopy(loader.Module):
             flood_seconds = active_data.get('flood_total_seconds', 0)
             speed = active_data.get('current_speed', 0)
             resume_at = active_data.get('flood_wait_until', 0)
-            resume_time = datetime.fromtimestamp(resume_at).strftime("%H:%M:%S") if resume_at else "неизвестно"
+            resume_time = datetime.fromtimestamp(resume_at, MSK).strftime("%H:%M:%S") if resume_at else "неизвестно"
             progress = round((current / total * 100), 1) if total > 0 else 0
             remaining = max(0, total - current)
             text = self.strings["task_detail_paused"].format(
@@ -1625,12 +1756,12 @@ class ChatCopy(loader.Module):
             ]
         await call.edit(text, reply_markup=btns)
 
-    async def _show_history_task_detail(self, call, task, num): #описание ниже
+    async def _show_history_task_detail(self, call, task, num): # описание ниже
         """Показывает детали завершённой задачи"""
         src = utils.escape_html(task.get('src', 'Unknown'))
         dest = utils.escape_html(task.get('dest', 'Unknown'))
         count = task.get('current', 0)
-        end_time = task.get('end_time', datetime.now())
+        end_time = task.get('end_time', datetime.now(MSK))
         if isinstance(end_time, datetime):
             end_time_str = end_time.strftime("%H:%M:%S")
         else:
@@ -1652,7 +1783,22 @@ class ChatCopy(loader.Module):
         btns = [[{"text": "🔙 К списку", "callback": self._panel_tasks}]]
         await call.edit(text, reply_markup=btns)
 
-    async def _action_task(self, call, tid, action): #вот эта хрень держит все что находится в панели, лучше не трогать
+    def _save_tasks(self):
+        """Saves the current task queue to DB, including live progress from active_dumps."""
+        tasks_to_save = []
+        for task in self.task_queue:
+            if task.get("status") in ["completed", "stopped", "error"]:
+                continue
+            snapshot = task.copy()
+            tid = snapshot.get('tid')
+            if tid and tid in self.active_dumps:
+                live = self.active_dumps[tid]
+                snapshot['current'] = live.get('current', snapshot.get('current', 0))
+                snapshot['total_msgs'] = live.get('total_estimated', snapshot.get('total_msgs', 0))
+            tasks_to_save.append(snapshot)
+        self.db.set("ChatCopy", "persistent_queue", tasks_to_save)
+
+    async def _action_task(self, call, tid, action): # вот эта хрень держит все что находится в панели, лучше не трогать
         if tid in self.active_dumps:
             if action == "pause":
                 self.active_dumps[tid]["status"] = "paused"
@@ -1675,23 +1821,25 @@ class ChatCopy(loader.Module):
                 return await self._panel_tasks(call)
         await self._show_task_detail(call, tid, 0)
 
-    async def _stop_specific(self, call, tid): #останавливаем определенную задачу (копирование)
+    async def _stop_specific(self, call, tid): # останавливаем определенную задачу (копирование)
         if tid in self.active_dumps:
             self.active_dumps[tid]["status"] = "stopped"
             self.active_dumps[tid]["cancel"].set()
         self.task_queue = [t for t in self.task_queue if t['tid'] != tid]
+        self._save_tasks() # сохраняем изменения
         await call.answer("Задача остановлена")
         await self._panel_tasks(call)
 
-    async def _remove_specific(self, call, tid): #удаляем определенную задачу (копирование)
+    async def _remove_specific(self, call, tid): # удаляем определенную задачу (копирование)
         if tid in self.active_dumps:
             self.active_dumps[tid]["status"] = "stopped"
             self.active_dumps[tid]["cancel"].set()
         self.task_queue = [t for t in self.task_queue if t['tid'] != tid]
+        self._save_tasks() # сохраняем изменения
         await call.answer("Задача удалена из очереди")
         await self._panel_tasks(call)
 
-    async def _panel_watching(self, call): #часть панели под кнопкой "Слежка", где ватчер следит за чатами
+    async def _panel_watching(self, call): # часть панели под кнопкой "Слежка", где ватчер следит за чатами
         text = f"<b>👀 Слежка ({len(self.watchlist)})</b>\n\n"
         btns = []
         for i, (cid, cfg) in enumerate(self.watchlist.items(), 1):
@@ -1703,7 +1851,7 @@ class ChatCopy(loader.Module):
         chunked_btns.append([{"text": self.strings["btn_back"], "callback": self._cb_back}])
         await call.edit(text or "<i>Пусто</i>", reply_markup=chunked_btns)
 
-    async def _panel_settings(self, call): #ну тут очевидно, вместо кфг такие настроечки
+    async def _panel_settings(self, call): # ну тут очевидно, вместо кфг такие настроечки
         text = (
             f"<b>⚙️ Настройки</b>\n\n"
             f"<b>Batch size:</b> <code>{self.config['batch_size']}</code>\n"
@@ -1722,13 +1870,20 @@ class ChatCopy(loader.Module):
         ]
         await call.edit(text, reply_markup=btns)
 
-    async def _panel_stats(self, call): #в панеле статус вызываем и смотрим чо как идет копирование
+    async def _panel_stats(self, call): # в панеле статус вызываем и смотрим чо как идет копирование
         total_tasks = len(self.task_stats)
         completed = sum(1 for t in self.task_stats.values() if t.get('completed_at'))
         stopped = total_tasks - completed
         total_floods = sum(t.get('flood_count', 0) for t in self.task_stats.values())
         total_flood_time = sum(t.get('flood_time', 0) for t in self.task_stats.values())
         avg_speeds = [t.get('avg_speed', 0) for t in self.task_stats.values() if t.get('avg_speed', 0) > 0]
+        if self.current_dump_task and self.current_dump_task in self.active_dumps:
+            active_task_data = self.active_dumps[self.current_dump_task]
+            total_tasks += 1
+            total_floods += active_task_data.get('flood_count', 0)
+            total_flood_time += active_task_data.get('flood_total_seconds', 0)
+            if active_task_data.get('current_speed', 0) > 0:
+                avg_speeds.append(active_task_data['current_speed'])
         global_avg = round(sum(avg_speeds) / len(avg_speeds), 1) if avg_speeds else 0
         text = self.strings["stats_title"]
         text += self.strings["stats_total"].format(
@@ -1738,15 +1893,15 @@ class ChatCopy(loader.Module):
             floods=total_floods
         )
         if global_avg > 0:
-            text += f"\n⚡ <b>Средняя скорость:</b> {global_avg} сообщений/мин"
+            text += f"\n⚡️ <b>Средняя скорость:</b> {global_avg} сообщений/мин"
         if total_flood_time > 0:
-            hours = total_flood_time // 3600
-            mins = (total_flood_time % 3600) // 60
-            text += f"\n⏱ <b>Общее время FW:</b> {hours}ч {mins}м"
+            hours = int(total_flood_time // 3600)
+            mins = int((total_flood_time % 3600) // 60)
+            text += f"\n⏱️ <b>Общее время FW:</b> {hours}ч {mins}м"
         btns = [[{"text": self.strings["btn_back"], "callback": self._cb_back}]]
         await call.edit(text, reply_markup=btns)
 
-    async def _change_setting(self, call, key, delta): #изменить настройки через панель чтоб в кфг не лезть
+    async def _change_setting(self, call, key, delta): # изменить настройки через панель чтоб в кфг не лезть
         current = self.config[key]
         if not isinstance(current, int):
             current = 10 if key == "delay" else 100 if key == "batch_size" else 5
@@ -1760,17 +1915,17 @@ class ChatCopy(loader.Module):
         self.config[key] = new_val
         await self._panel_settings(call)
 
-    async def _clear_topics_cache(self, call): #ну, очевидно
+    async def _clear_topics_cache(self, call): # ну, очевидно
         self.topic_mapping = {}
         self.topic_info_cache = {}
         self.db.set("ChatCopy", "topic_mapping", {})
         await call.answer("Кэш топиков очищен!")
         await self._panel_settings(call)
 
-    async def _cb_back(self, call):  #кнопка назад
+    async def _cb_back(self, call):  # кнопка назад
         await self._show_main_panel(call, edit=True)
 
-    async def _stop_watch(self, call, cid): #стопаем ватчер тута, исправлен баг
+    async def _stop_watch(self, call, cid): # стопаем ватчер тута
         if cid in self.watchlist:
             if cid in self.watcher_buffer:
                 self.watcher_buffer[cid] = []
