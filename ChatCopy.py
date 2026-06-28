@@ -3450,6 +3450,13 @@ class ChatCopy(loader.Module):
         start_id_str = "С начала" if last_id <= 0 else f"с {last_id + 1}"
         if final_id > 0:
             start_id_str += f" до {final_id}"
+        try:
+            _src_pid = int(self._get_normalized_id(src_entity))
+            if await self._source_has_copy_restriction(src_entity):
+                self._restricted_srcs.add(_src_pid)  # авто-обход запрета пересылки (bypass mode) для профилей
+        except Exception:
+            _src_pid = None
+        bypass_str = "Авто-скачка (запрет пересылки)" if (_src_pid is not None and _src_pid in self._restricted_srcs) else "Нет (обычная пересылка)"
         await self._inline_edit(call, 
             self.strings["copy_start"].format(
                 src=utils.escape_html(str(src_title)),
@@ -3463,6 +3470,7 @@ class ChatCopy(loader.Module):
                 total_msgs=total_msgs if total_msgs > -1 else "∞ (ошибка подсчета)",
                 estimated_time=self._estimate_duration(total_msgs),
                 position="профиль",
+                bypass=bypass_str,
             ),
             reply_markup=[[{"text": self.strings["btn_back"], "callback": self._profile_detail, "args": [num, cid]}]],
         )
