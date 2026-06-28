@@ -1637,6 +1637,7 @@ class ChatCopy(loader.Module):
                 floods=ad.get("flood_count", 0), flood_time=self._fmt_left(ad.get("flood_total_seconds", 0)))
         await utils.answer(message, self._default_html(text))
 
+    @loader.command()
     async def chatcopy(self, message: Message):
         """<src> <dest> [start_id:final_id] [-n] [-dmc] [--now] [--noflood] [-status] [--itopic 1] [-theme123] [--media|--photo_video|--docs|--text] — Добавить задачу в очередь."""
         args_raw = self._split_args(message)
